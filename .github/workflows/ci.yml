@@ -1,0 +1,45 @@
+name: CI
+# Verity's hygiene gate (framework-spec.md §3): lint + secret-scan + tests.
+# Honestly green on a near-empty repo because every check is real, not vacuous.
+# The test gate grows teeth at the walking skeleton; a deploy gate is added later.
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pull-requests: read # gitleaks lists PR commits via the API on pull_request
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install (pinned)
+        run: npm ci
+      - name: Biome check
+        run: npm run lint
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run tests
+        run: node scripts/run-tests.cjs
