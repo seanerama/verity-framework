@@ -68,3 +68,13 @@ test('scaffold init via CLI produces the file set', () => {
   assert(fs.existsSync(path.join(tmp, '.github/workflows/ci.yml')), 'ci.yml on disk');
   assert(fs.existsSync(path.join(tmp, '.verity/config.json')), 'config ensured');
 });
+
+test('install --claude --target via CLI lays down the command', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-cli-inst-'));
+  const out = JSON.parse(run(['install', '--claude', '--target', tmp]));
+  assertEqual(out.harness, 'claude');
+  assert(
+    fs.existsSync(path.join(tmp, 'commands', 'verity', 'vision.md')),
+    'vision command installed',
+  );
+});
