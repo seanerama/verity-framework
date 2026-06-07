@@ -105,4 +105,15 @@ function dispatch(args, flags) {
   throw new Error(`unknown config verb: ${verb || '(none)'} — use ensure|get|set`);
 }
 
-module.exports = { DEFAULTS, configPath, readConfig, ensure, get, set, dispatch };
+module.exports = {
+  DEFAULTS,
+  configPath,
+  readConfig,
+  ensure,
+  get,
+  set,
+  dispatch,
+  getAt,
+  setAt,
+  coerce,
+};
