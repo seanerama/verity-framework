@@ -25,6 +25,7 @@ const handoff = require('./lib/handoff.cjs');
 const map = require('./lib/map.cjs');
 const recovery = require('./lib/recovery.cjs');
 const golive = require('./lib/golive.cjs');
+const smoke = require('./lib/smoke.cjs');
 
 function parseArgs(argv) {
   const positional = [];
@@ -149,6 +150,9 @@ const COMMANDS = {
   },
   golive(rest, flags) {
     return golive.dispatch(rest, flags);
+  },
+  smoke(rest, flags) {
+    return smoke.dispatch(rest, flags);
   },
 };
 
