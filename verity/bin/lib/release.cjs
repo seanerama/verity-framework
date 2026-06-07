@@ -79,7 +79,8 @@ function prependChangelog(cwd, section) {
   const p = path.join(cwd, 'CHANGELOG.md');
   const header = '# Changelog';
   const existing = fs.existsSync(p) ? fs.readFileSync(p, 'utf8').replace(header, '').trim() : '';
-  fs.writeFileSync(p, `${header}\n\n${section}\n\n${existing}`.trim() + '\n');
+  const body = `${header}\n\n${section}\n\n${existing}`.trim();
+  fs.writeFileSync(p, `${body}\n`);
 }
 
 function run(cmd, args) {
