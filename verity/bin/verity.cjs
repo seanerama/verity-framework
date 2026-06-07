@@ -9,6 +9,7 @@ const path = require('node:path');
 
 const core = require('./lib/core.cjs');
 const config = require('./lib/config.cjs');
+const identity = require('./lib/identity.cjs');
 
 function parseArgs(argv) {
   const positional = [];
@@ -41,7 +42,16 @@ function parseArgs(argv) {
 function emit(result, flags) {
   if (flags.raw) {
     const raw = result && typeof result === 'object' && 'raw' in result ? result.raw : result;
-    process.stdout.write(`${raw === null || raw === undefined ? '' : raw}\n`);
+    let text = '';
+    if (raw === null || raw === undefined) {
+      text = '';
+    } else if (typeof raw === 'object') {
+      // A structured result with no scalar `raw` — emit compact JSON, never "[object Object]".
+      text = JSON.stringify(raw);
+    } else {
+      text = String(raw);
+    }
+    process.stdout.write(`${text}\n`);
     return;
   }
   const json = JSON.stringify(result, null, 2);
@@ -73,6 +83,9 @@ const COMMANDS = {
   },
   config(rest, flags) {
     return config.dispatch(rest, flags);
+  },
+  identity(rest, flags) {
+    return identity.dispatch(rest, flags);
   },
 };
 
