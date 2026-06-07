@@ -11,6 +11,7 @@ const core = require('./lib/core.cjs');
 const config = require('./lib/config.cjs');
 const identity = require('./lib/identity.cjs');
 const scaffold = require('./lib/scaffold.cjs');
+const install = require('./lib/install.cjs');
 
 function parseArgs(argv) {
   const positional = [];
@@ -90,6 +91,9 @@ const COMMANDS = {
   },
   scaffold(rest, flags) {
     return scaffold.dispatch(rest, flags);
+  },
+  install(rest, flags) {
+    return install.dispatch(rest, flags);
   },
 };
 
