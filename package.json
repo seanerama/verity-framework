@@ -1,19 +1,29 @@
 {
   "name": "verity-framework",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Verity — a CI/CD-native, GitHub-native, production-lifecycle AI software delivery framework.",
   "keywords": ["verity", "ai", "ci-cd", "github", "devops", "agent", "framework"],
   "author": "Sean Mahoney",
   "license": "MIT",
+  "homepage": "https://github.com/seanerama/verity-framework#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seanerama/verity-framework.git"
+  },
+  "bugs": {
+    "url": "https://github.com/seanerama/verity-framework/issues"
+  },
   "bin": {
     "verity": "verity/bin/verity.cjs"
   },
+  "files": ["verity", "commands", "README.md", "LICENSE"],
   "engines": {
     "node": ">=16.7.0"
   },
   "scripts": {
     "test": "node scripts/run-tests.cjs",
-    "lint": "biome ci ."
+    "lint": "biome ci .",
+    "prepublishOnly": "npm run lint && npm test"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4"
