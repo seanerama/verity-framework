@@ -52,4 +52,12 @@ function generateSlug(text) {
     .replace(/-+$/, '');
 }
 
-module.exports = { validateSlug, generateSlug };
+// Render a template: replace {{key}} (word chars only, no spaces) so GitHub Actions
+// ${{ ... }} expressions — which always contain spaces/dots — pass through untouched.
+function render(tmpl, vars) {
+  return String(tmpl).replace(/\{\{(\w+)\}\}/g, (match, key) =>
+    key in vars ? String(vars[key] ?? '') : match,
+  );
+}
+
+module.exports = { validateSlug, generateSlug, render };

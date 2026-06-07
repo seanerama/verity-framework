@@ -8,6 +8,7 @@ const path = require('node:path');
 
 const identity = require('./identity.cjs');
 const config = require('./config.cjs');
+const { render } = require('./core.cjs');
 
 const TEMPLATES_DIR = path.join(__dirname, '..', '..', 'templates');
 
@@ -19,14 +20,6 @@ const FILES = [
   { out: '.github/ISSUE_TEMPLATE/bug_report.yml', tmpl: 'bug_report.yml.tmpl' },
   { out: 'STATUS.md', tmpl: 'STATUS.md.tmpl' },
 ];
-
-// Replace {{key}} (word chars only, no spaces) so GitHub Actions ${{ ... }}
-// expressions — which always contain spaces/dots — pass through untouched.
-function render(tmpl, vars) {
-  return tmpl.replace(/\{\{(\w+)\}\}/g, (match, key) =>
-    key in vars ? String(vars[key] ?? '') : match,
-  );
-}
 
 function readTemplate(name) {
   return fs.readFileSync(path.join(TEMPLATES_DIR, name), 'utf8');

@@ -12,6 +12,9 @@ const config = require('./lib/config.cjs');
 const identity = require('./lib/identity.cjs');
 const scaffold = require('./lib/scaffold.cjs');
 const install = require('./lib/install.cjs');
+const adr = require('./lib/adr.cjs');
+const contract = require('./lib/contract.cjs');
+const catalog = require('./lib/catalog.cjs');
 
 function parseArgs(argv) {
   const positional = [];
@@ -94,6 +97,18 @@ const COMMANDS = {
   },
   install(rest, flags) {
     return install.dispatch(rest, flags);
+  },
+  adr(rest, flags) {
+    return adr.dispatch(rest, flags);
+  },
+  contract(rest, flags) {
+    return contract.dispatch(rest, flags);
+  },
+  guides(rest) {
+    return catalog.guidesDispatch(rest);
+  },
+  feature(rest) {
+    return catalog.featureDispatch(rest);
   },
 };
 
