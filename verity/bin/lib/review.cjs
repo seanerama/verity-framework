@@ -5,16 +5,18 @@ const { execFileSync } = require('node:child_process');
 
 const stage = require('./stage.cjs');
 const contract = require('./contract.cjs');
+const security = require('./security.cjs');
 
 // The checklist is PRE-DECLARED (acceptance conditions from the stage spec +
 // contracts to verify conformance against). The Reviewer verifies each against the
 // actual diff/source — never the PR description (the headline behavior).
 function checklist(cwd, n) {
+  const invariants = security.read(cwd);
   return {
     stage: n,
     acceptance: stage.acceptanceText(cwd, n),
     contracts: contract.list(cwd).contracts,
-    securityInvariants: '(defined by the Security Auditor — wired when that role lands)',
+    securityInvariants: invariants || '(none defined — run `verity security init`)',
     instructions:
       'Verify each item against the ACTUAL diff/source, not the PR description. Confirm CI is green first.',
   };
