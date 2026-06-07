@@ -16,6 +16,7 @@ const adr = require('./lib/adr.cjs');
 const contract = require('./lib/contract.cjs');
 const catalog = require('./lib/catalog.cjs');
 const stage = require('./lib/stage.cjs');
+const ledger = require('./lib/ledger.cjs');
 
 function parseArgs(argv) {
   const positional = [];
@@ -113,6 +114,9 @@ const COMMANDS = {
   },
   stage(rest, flags) {
     return stage.dispatch(rest, flags);
+  },
+  state(rest, flags) {
+    return ledger.dispatch(rest, flags);
   },
 };
 
