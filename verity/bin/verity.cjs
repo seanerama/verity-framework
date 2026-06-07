@@ -18,6 +18,8 @@ const catalog = require('./lib/catalog.cjs');
 const stage = require('./lib/stage.cjs');
 const ledger = require('./lib/ledger.cjs');
 const review = require('./lib/review.cjs');
+const release = require('./lib/release.cjs');
+const status = require('./lib/status.cjs');
 
 function parseArgs(argv) {
   const positional = [];
@@ -121,6 +123,12 @@ const COMMANDS = {
   },
   review(rest, flags) {
     return review.dispatch(rest, flags);
+  },
+  release(rest, flags) {
+    return release.dispatch(rest, flags);
+  },
+  status(rest, flags) {
+    return status.dispatch(rest, flags);
   },
 };
 
