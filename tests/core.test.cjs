@@ -1,4 +1,4 @@
-const { validateSlug } = require('../verity/bin/lib/core.cjs');
+const { validateSlug, generateSlug } = require('../verity/bin/lib/core.cjs');
 
 test('accepts a clean slug', () => {
   const r = validateSlug('verity-framework');
@@ -29,4 +29,18 @@ test('reports the specific issue for an invalid slug', () => {
   const r = validateSlug('Bad_Name');
   assertEqual(r.valid, false, 'should be invalid');
   assert(r.issues.length > 0, 'should list at least one issue');
+});
+
+test('generateSlug produces a clean, valid slug from messy text', () => {
+  const slug = generateSlug('My Cool App!');
+  assertEqual(slug, 'my-cool-app');
+  assert(validateSlug(slug).valid, 'generated slug should pass validation');
+});
+
+test('generateSlug collapses runs and trims hyphens', () => {
+  assertEqual(generateSlug('  Foo --- Bar__Baz  '), 'foo-bar-baz');
+});
+
+test('generateSlug caps at 63 chars', () => {
+  assert(generateSlug('a'.repeat(100)).length <= 63, 'should cap at 63');
 });
