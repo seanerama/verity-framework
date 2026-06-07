@@ -5,6 +5,9 @@
   "keywords": ["verity", "ai", "ci-cd", "github", "devops", "agent", "framework"],
   "author": "Sean Mahoney",
   "license": "MIT",
+  "bin": {
+    "verity": "verity/bin/verity.cjs"
+  },
   "engines": {
     "node": ">=16.7.0"
   },

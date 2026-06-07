@@ -38,4 +38,18 @@ function validateSlug(slug) {
   return { valid: issues.length === 0, issues };
 }
 
-module.exports = { validateSlug };
+// Turn arbitrary text into a slug candidate (lowercase, hyphen-joined, trimmed,
+// capped at 63). The result may still fail validateSlug (e.g. a leading digit) —
+// the caller validates and surfaces issues; this only proposes.
+function generateSlug(text) {
+  return String(text ?? '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '')
+    .slice(0, 63)
+    .replace(/-+$/, '');
+}
+
+module.exports = { validateSlug, generateSlug };
