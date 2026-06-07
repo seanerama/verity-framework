@@ -59,3 +59,12 @@ test('--raw on a structured result emits JSON, never [object Object]', () => {
   assert(!out.includes('[object Object]'), 'must not stringify an object naively');
   assert(out.includes('model_profile'), 'should emit the config as JSON');
 });
+
+test('scaffold init via CLI produces the file set', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-cli-scaf-'));
+  run(['identity', 'lock', 'Cli Demo', 'cli-demo', '--owner', 'acme', '--cwd', tmp]);
+  const out = JSON.parse(run(['scaffold', 'init', '--cwd', tmp, '--description', 'Hi']));
+  assert(out.created.includes('STATUS.md'), 'should create STATUS.md');
+  assert(fs.existsSync(path.join(tmp, '.github/workflows/ci.yml')), 'ci.yml on disk');
+  assert(fs.existsSync(path.join(tmp, '.verity/config.json')), 'config ensured');
+});

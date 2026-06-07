@@ -10,6 +10,7 @@ const path = require('node:path');
 const core = require('./lib/core.cjs');
 const config = require('./lib/config.cjs');
 const identity = require('./lib/identity.cjs');
+const scaffold = require('./lib/scaffold.cjs');
 
 function parseArgs(argv) {
   const positional = [];
@@ -86,6 +87,9 @@ const COMMANDS = {
   },
   identity(rest, flags) {
     return identity.dispatch(rest, flags);
+  },
+  scaffold(rest, flags) {
+    return scaffold.dispatch(rest, flags);
   },
 };
 
