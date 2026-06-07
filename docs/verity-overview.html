@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Verity — Overview Guide</title>
+<style>
+  :root{
+    --bg:#0c1018; --panel:#141b27; --panel2:#1b2433; --line:#283449;
+    --txt:#e8eef6; --dim:#9fb0c4; --faint:#69788c;
+    --brain:#b083f0; --brain-bg:#1d1430;
+    --note:#3ddc97; --note-bg:#08291d;
+    --accent:#5cc8ff; --accent-bg:#082236;
+    --warn:#ffc14d;
+    --relay:#5cc8ff; --ledger:#3ddc97; --gate:#ffc14d; --shipyard:#b083f0; --verify:#ff7eb6;
+    --mono:'SF Mono',ui-monospace,'Cascadia Code','JetBrains Mono',Menlo,Consolas,monospace;
+    --ui:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--ui);font-size:14.5px;line-height:1.55}
+  .wrap{max-width:1180px;margin:0 auto;padding:24px 22px 70px}
+  header .badge{display:inline-block;font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--note);border:1px solid #16432f;background:var(--note-bg);padding:3px 9px;border-radius:20px;font-weight:600}
+  header h1{font-size:30px;margin:10px 0 2px;letter-spacing:-.5px}
+  header h1 .v{color:var(--note)}
+  header .tag{font-size:16px;color:var(--dim);margin:0}
+  header .lead{color:var(--dim);font-size:14px;margin:12px 0 0;max-width:760px}
+
+  /* mental model */
+  .mental{display:grid;grid-template-columns:1fr auto 1fr;gap:14px;align-items:stretch;margin:22px 0 8px}
+  @media(max-width:760px){.mental{grid-template-columns:1fr}.swap{flex-direction:row !important;min-height:0 !important}}
+  .mcard{border:1px solid var(--line);border-radius:14px;padding:16px;background:var(--panel)}
+  .mcard.brain{border-color:#3a2a55;background:linear-gradient(180deg,var(--brain-bg),var(--panel))}
+  .mcard.note{border-color:#16432f;background:linear-gradient(180deg,var(--note-bg),var(--panel))}
+  .mcard h3{margin:0 0 6px;font-size:15px;display:flex;align-items:center;gap:9px}
+  .mcard .pill{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;padding:2px 8px;border-radius:20px}
+  .brain .pill{background:var(--brain);color:#160a26}
+  .note .pill{background:var(--note);color:#06241a}
+  .mcard p{margin:7px 0 0;color:var(--dim);font-size:13px}
+  .swap{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:var(--faint);min-width:104px;text-align:center;font-size:12px}
+  .swap b{color:var(--txt)}
+  .keyidea{margin-top:12px;background:var(--accent-bg);border:1px solid #14385a;border-radius:12px;padding:13px 15px;color:#cfe7fb;font-size:13.5px}
+  .keyidea b{color:#fff}
+
+  nav.tabs{display:flex;gap:4px;margin:22px 0 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  nav.tabs button{appearance:none;background:none;border:none;color:var(--dim);font-family:var(--ui);font-size:14px;padding:11px 15px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;border-radius:8px 8px 0 0}
+  nav.tabs button:hover{color:var(--txt);background:var(--panel)}
+  nav.tabs button.on{color:var(--txt);border-bottom-color:var(--note);background:var(--panel)}
+
+  .stage{display:grid;grid-template-columns:1fr 350px;gap:16px;margin-top:18px}
+  @media(max-width:940px){.stage{grid-template-columns:1fr}}
+  .canvas{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;min-height:420px}
+  .detail{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;align-self:start;position:sticky;top:14px}
+  svg{width:100%;height:auto;display:block}
+
+  h2.sec{font-size:18px;margin:2px 0 10px}
+  p.intro{color:var(--dim);font-size:13.6px;margin:0 0 14px}
+
+  /* start-here rows */
+  .rows .row{display:flex;gap:13px;padding:13px 0;border-bottom:1px solid var(--line)}
+  .rows .row:last-child{border-bottom:none}
+  .rows .ic{font-size:20px;flex:0 0 28px}
+  .rows h4{margin:0 0 3px;font-size:14.5px}
+  .rows p{margin:0;color:var(--dim);font-size:13px}
+  .vs{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+  @media(max-width:680px){.vs{grid-template-columns:1fr}}
+  .vs .col{border:1px solid var(--line);border-radius:11px;padding:13px}
+  .vs .col.bad{border-color:#3a2330;background:#1d1117}
+  .vs .col.good{border-color:#16432f;background:#0c2419}
+  .vs h5{margin:0 0 7px;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+  .vs .bad h5{color:#ff8e9e}.vs .good h5{color:var(--note)}
+  .vs ul{margin:0;padding-left:17px;color:var(--dim);font-size:12.8px}.vs li{margin:4px 0}
+
+  /* arcs svg nodes */
+  .node{cursor:pointer}
+  .node rect{transition:filter .12s}
+  .node:hover rect{filter:brightness(1.22)}
+  .node.sel rect{stroke-width:2.5}
+  .ntitle{font:700 13px var(--ui);fill:var(--txt)}
+  .nsub{font:11px var(--ui);fill:var(--dim)}
+  .edge{stroke:var(--faint);stroke-width:1.8;fill:none}
+  .arclabel{font:800 11px var(--ui);letter-spacing:1px;text-transform:uppercase}
+
+  /* subsystem cards */
+  .subs{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .sub{border:1px solid var(--line);border-radius:12px;padding:13px;cursor:pointer;background:var(--panel2);transition:all .12s}
+  .sub:hover{transform:translateY(-2px)}
+  .sub.sel{border-width:2px}
+  .sub .nm{font-weight:700;font-size:14px;display:flex;align-items:center;gap:7px}
+  .sub .dot{width:11px;height:11px;border-radius:50%}
+  .sub .one{color:var(--dim);font-size:12px;margin-top:5px}
+
+  /* follow-a-change */
+  .walk{display:flex;flex-direction:column;gap:0}
+  .wstep{display:flex;gap:13px;align-items:flex-start;padding:11px 0;opacity:.4;transition:opacity .25s}
+  .wstep.on{opacity:1}
+  .wstep .wn{flex:0 0 30px;height:30px;border-radius:50%;background:var(--panel2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:var(--dim)}
+  .wstep.on .wn{background:var(--note);color:#06241a;border-color:var(--note)}
+  .wstep h4{margin:0 0 2px;font-size:14px}
+  .wstep code{font-family:var(--mono);font-size:12px;background:#0a0e16;border:1px solid var(--line);padding:1px 6px;border-radius:5px;color:var(--accent)}
+  .wstep p{margin:3px 0 0;color:var(--dim);font-size:12.8px}
+  .walkbar{display:flex;gap:8px;margin-bottom:14px}
+  .btn{appearance:none;border:1px solid var(--line);background:var(--panel2);color:var(--txt);border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13px;font-family:var(--ui)}
+  .btn:hover{border-color:var(--note)}
+  .btn.primary{background:var(--note);color:#06241a;border-color:var(--note);font-weight:600}
+
+  /* detail panel */
+  .detail .ph{font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;font-weight:700;padding:2px 9px;border-radius:20px;display:inline-block}
+  .detail h3{font-size:17px;margin:9px 0 8px}
+  .detail p{color:var(--dim);font-size:13.2px;margin:0 0 10px}
+  .detail .analogy{background:var(--panel2);border-left:3px solid var(--note);border-radius:7px;padding:9px 11px;font-size:12.8px;color:#cfe7d9}
+  .detail h5{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);margin:14px 0 5px}
+  .detail ul{margin:0;padding-left:17px;color:var(--dim);font-size:12.8px}.detail li{margin:3px 0}
+  .gloss{font-family:var(--mono);font-size:11px;background:#0a0e16;border:1px solid var(--line);padding:1px 5px;border-radius:4px;color:var(--note)}
+
+  /* glossary */
+  .gl{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:11px}
+  .gl .g{border:1px solid var(--line);border-radius:10px;padding:11px 13px;background:var(--panel2)}
+  .gl .g b{color:var(--txt);font-size:13.5px}
+  .gl .g p{margin:4px 0 0;color:var(--dim);font-size:12.5px}
+
+  .promptbox{margin-top:18px;background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:14px 16px}
+  .promptbox .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .promptbox h4{margin:0;font-size:12.5px;color:var(--dim);font-weight:600}
+  .promptbox textarea{width:100%;min-height:64px;background:#0a0e16;border:1px solid var(--line);border-radius:8px;color:#c9d6e3;font-family:var(--mono);font-size:11.8px;padding:10px;resize:vertical;line-height:1.5}
+  .copy{appearance:none;border:1px solid var(--line);background:var(--panel2);color:var(--txt);border-radius:7px;padding:6px 13px;cursor:pointer;font-size:12px}
+  .copy:hover{border-color:var(--note);color:var(--note)}
+  .copy.done{border-color:var(--note);color:var(--note)}
+  .foot{margin-top:16px;color:var(--faint);font-size:11.5px;text-align:center}
+  .foot a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="badge">Overview Guide · no jargon required</span>
+    <h1><span class="v">Verity</span></h1>
+    <p class="tag">Prompt to production, proven.</p>
+    <p class="lead">Verity is a way to have an <b>AI build real software for you</b> — and not stop at "the code is written," but keep going until the software is tested, running, and <b>proven to actually work</b>. This guide explains what it is and how it works, assuming you know almost nothing about coding.</p>
+  </header>
+
+  <!-- mental model -->
+  <div class="mental">
+    <div class="mcard brain">
+      <h3><span class="pill">The Brain</span> the AI</h3>
+      <p>The smart part — it talks to you, makes decisions, and writes the actual code. Like a brilliant employee who is also a little <b>forgetful</b>: in a long conversation it can lose track of what's been done.</p>
+    </div>
+    <div class="swap">
+      <div>asks "what's next?"<br>records "this is done"<br><b>↑ ↓</b><br>plain, exact answers</div>
+    </div>
+    <div class="mcard note">
+      <h3><span class="pill">The Notebook</span> the <code style="font-family:var(--mono);font-size:12px">verity</code> tool</h3>
+      <p>A small <b>ordinary program</b> (no AI). It's the checklist that <b>never forgets</b>: it tracks the rules, knows what's allowed to happen next, and keeps the official record of progress.</p>
+    </div>
+  </div>
+  <div class="keyidea">
+    <b>Verity's trick:</b> because the AI is forgetful, it never trusts its own memory for "what's done." It reads the truth from <b>GitHub</b> (the place the code lives) every time. So a brand-new conversation — or a teammate's AI — can pick up <i>exactly</i> where things left off. Nothing drifts, nothing lies.
+  </div>
+
+  <nav class="tabs" id="tabs">
+    <button data-tab="why" class="on">Why it exists</button>
+    <button data-tab="how">How it works</button>
+    <button data-tab="parts">The 5 parts</button>
+    <button data-tab="follow">Follow a change</button>
+    <button data-tab="gloss">Word list</button>
+  </nav>
+
+  <div class="stage">
+    <div class="canvas" id="canvas"></div>
+    <aside class="detail" id="detail"></aside>
+  </div>
+
+  <div class="promptbox">
+    <div class="top">
+      <h4>📋 Want it explained even simpler? Copy this and paste it to an AI assistant</h4>
+      <button class="copy" id="copyBtn">Copy</button>
+    </div>
+    <textarea id="promptOut" readonly></textarea>
+  </div>
+
+  <p class="foot">Verity · <span class="gloss">npm: verity-framework</span> · the companion <b>Usage Guide</b> shows exactly what to type. <a href="https://github.com/seanerama/verity-framework">github.com/seanerama/verity-framework</a></p>
+</div>
+
+<script>
+const SUBS = [
+  { id:'relay', name:'Relay', color:'var(--relay)', one:'The conductor — routes work to the right specialist in the right order.',
+    long:'Verity does work as a series of <b>specialist roles</b> (a planner, a builder, a reviewer, a release manager, and more) — not one chatbot trying to do everything. Relay is the conductor that hands each job to the right specialist and knows which step is allowed to happen next.',
+    analogy:'Like a head chef calling out tickets: the right cook gets the right order at the right time.',
+    facts:['Roles hand work to each other through clear rules','Knows what is unblocked to do next','Same idea whether one AI or several are working'] },
+  { id:'ledger', name:'Ledger', color:'var(--ledger)', one:'The honest scoreboard — reads progress from GitHub, never a file that drifts.',
+    long:'Instead of keeping a to-do file that someone forgets to update, Verity figures out "what\'s done" by <b>reading the real record on GitHub</b> — what code got accepted, what got released. The record is created by the work itself, so it can\'t be wrong.',
+    analogy:'Like checking the actual bank statement instead of a sticky note of what you think you spent.',
+    facts:['Progress is read, never hand-typed','A merged change IS "built"; a tag IS "released"','No drift, and no conflicts when several people work at once'] },
+  { id:'gate', name:'Gate', color:'var(--gate)', one:'The bouncer — nothing moves forward unless it passes the checks.',
+    long:'Before any change is accepted, the Gate makes sure it earns it: automated checks pass, security rules are met, and a <b>different</b> reviewer reads the actual code (the author never approves their own work). If the checks are red, it does not go in.',
+    analogy:'Like a bouncer with a checklist: no green check, no entry — no exceptions for the owner\'s friends.',
+    facts:['Tests must be green','Security rules verified against the real code','The author cannot approve their own change'] },
+  { id:'shipyard', name:'Shipyard', color:'var(--shipyard)', one:'Where code becomes a running release that real people can use.',
+    long:'Shipyard turns accepted code into a real, running version: it stamps a version number, packages it, deploys it, and writes down <b>exactly what is live right now</b> (so anyone can see the current state at a glance).',
+    analogy:'Like a factory\'s shipping dock: it boxes the product, sends it out, and logs what went where.',
+    facts:['Version + changelog generated automatically','Tries it on a practice copy first, then the real one','Keeps an honest record of what is currently live'] },
+  { id:'verify', name:'Verify', color:'var(--verify)', one:'The reality check — drives the app like a real user to prove it works.',
+    long:'The most important idea in Verity. "The code compiled" is not the same as "the feature works." Verify actually <b>opens the app and clicks the button</b> like a person would, to confirm the thing really works. If it can\'t check, it honestly says "not verified" — it never pretends.',
+    analogy:'Like test-driving the car off the lot, not just trusting that the engine light is off.',
+    facts:['Drives the real interface, not just a health check','Catches "looks done but the button is dead" bugs','If it can\'t truly check, it refuses to call it "passed"'] },
+];
+const SUB_BY = Object.fromEntries(SUBS.map(s=>[s.id,s]));
+
+const ARCS = [
+  { id:'bootstrap', label:'1 · Set up', color:'var(--accent)',
+    title:'Bootstrap — set up and PROVE the pipeline', when:'Happens once, at the very start.',
+    long:'Before building any features, Verity sets the project up and proves the whole "build → test → ship" machine actually works on a tiny example. You name the project, it creates the code home (the repo), designs the rough shape, and gets a <b>thinnest-possible working slice</b> all the way to "running and checked." Only then do features begin.',
+    analogy:'Like building 10 feet of a factory assembly line and running one toy product all the way through — before mass production.',
+    facts:['Name + create the project','Design the approach (and write down the "why")','Get a tiny end-to-end slice green and running first'] },
+  { id:'stream', label:'2 · Build (loop)', color:'var(--note)',
+    title:'Stream — build features, one loop at a time', when:'The main, repeating part of the work.',
+    long:'Every feature flows through the <b>same short loop</b>: describe it → build it on its own copy → checks run → a reviewer approves it → it gets merged in. Then the next feature. Each one rides the proven machine from step 1.',
+    analogy:'Like an assembly line that\'s already known to work — each new order just runs down the same proven track.',
+    facts:['plan → build → review → merge, repeated','Each feature is isolated until it\'s proven','Built-in rules (like an off-switch for risky features)'] },
+  { id:'operate', label:'3 · Ship & run', color:'var(--shipyard)',
+    title:'Operate — ship releases and keep it alive', when:'Runs continuously, alongside building.',
+    long:'Turn accepted work into real releases people can use, then keep the running system healthy: deploy, verify it works for real, watch its health, handle security, and keep the documentation current.',
+    analogy:'Like opening the store and then actually running it day to day — restocking, security, keeping the lights on.',
+    facts:['Cut a release → deploy → verify it works','Keep an honest "what\'s live" record','Health, backups, security, and docs over time'] },
+];
+const ARC_BY = Object.fromEntries(ARCS.map(a=>[a.id,a]));
+
+const WALK = [
+  { h:'You describe what you want', c:'/verity:plan', p:'You say "add a profile page." Verity writes it down as a clear task with a built-in definition of "done."' },
+  { h:'The AI builds it — on its own copy', c:'/verity:build', p:'The code is written on a separate copy (a "branch") so it can\'t break what already works.' },
+  { h:'Automatic checks run', c:'CI', p:'A robot runs the tests and security scans. Green = healthy. Red = stop and fix.' },
+  { h:'A different reviewer approves it', c:'/verity:review', p:'A fresh, skeptical reviewer checks the real code — never the author. Red checks? It refuses to accept it.' },
+  { h:'It gets merged in', c:'merge', p:'Now it\'s officially part of the project. GitHub records this — that\'s how Verity knows it\'s "done."' },
+  { h:'It\'s released and deployed', c:'/verity:ship', p:'A version is stamped and the software is put online, first on a practice copy, then for real.' },
+  { h:'Proven to actually work', c:'/verity:verify', p:'Verity opens the live app and clicks the new profile page like a user. It works → done, for real. ✅' },
+];
+
+const state = { tab:'why', sub:'ledger', arc:'stream', step:0 };
+const $=s=>document.querySelector(s);
+function el(t,c,h){const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;}
+
+function setTab(t){state.tab=t;document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===t));render();}
+
+function render(){
+  if(state.tab==='why') renderWhy();
+  else if(state.tab==='how') renderHow();
+  else if(state.tab==='parts') renderParts();
+  else if(state.tab==='follow') renderFollow();
+  else if(state.tab==='gloss') renderGloss();
+  renderDetail(); updatePrompt();
+}
+
+function renderWhy(){
+  const c=$('#canvas');c.innerHTML='';
+  c.appendChild(el('h2','sec','What problem does Verity solve?'));
+  c.appendChild(el('p','intro','Most AI coding tools happily write code and then stop — leaving you to figure out if it actually works, runs, and is safe. That gap is where things break. Verity treats <b>shipping working software as the whole job</b>, not an afterthought.'));
+  const vs=el('div','vs');
+  vs.appendChild(el('div','col bad','<h5>A typical AI coding tool</h5><ul><li>Writes code, then says "done"</li><li>You discover later it doesn\'t run</li><li>Forgets context between chats</li><li>One AI tries to do everything</li><li>"Done" = code exists</li></ul>'));
+  vs.appendChild(el('div','col good','<h5>Verity</h5><ul><li>Builds, tests, ships, and <b>verifies</b></li><li>Proves it works before calling it done</li><li>Reads progress from GitHub — never forgets</li><li>Specialist roles with clear handoffs</li><li><b>"Done" = deployed and proven</b></li></ul>'));
+  c.appendChild(vs);
+  c.appendChild(el('h2','sec','Who is it for?'));
+  const rows=el('div','rows');
+  [['🚀','Solo builders & founders','Ship a serious app without a full engineering team — the AI follows a disciplined process instead of vibes.'],
+   ['🤝','Small teams using AI','Several people (and their AIs) can work the same project safely, because GitHub is the shared source of truth.'],
+   ['🛠️','Anyone past the prototype','It\'s built for the messy middle — taking something from "works on my machine" to "running in production and trusted."']]
+   .forEach(([i,h,p])=>{const r=el('div','row');r.appendChild(el('div','ic',i));const tx=el('div');tx.appendChild(el('h4',null,h));tx.appendChild(el('p',null,p));r.appendChild(tx);rows.appendChild(r);});
+  c.appendChild(rows);
+}
+
+function renderHow(){
+  const c=$('#canvas');c.innerHTML='';
+  c.appendChild(el('h2','sec','How it works: three stages'));
+  c.appendChild(el('p','intro','A Verity project moves through three stages. The first happens once; the middle one repeats for every feature; the last runs the whole time. <b>Click a stage</b> to learn more.'));
+  const svgNS='http://www.w3.org/2000/svg';
+  const svg=document.createElementNS(svgNS,'svg');svg.setAttribute('viewBox','0 0 620 230');
+  const defs=document.createElementNS(svgNS,'defs');
+  defs.innerHTML='<marker id="ah" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0,9 3.5,0 7" fill="#69788c"/></marker>';
+  svg.appendChild(defs);
+  const pos={bootstrap:[20,80],stream:[235,80],operate:[450,80]};
+  // edges
+  [['bootstrap','stream'],['stream','operate']].forEach(([a,b])=>{
+    const p=document.createElementNS(svgNS,'path');const x1=pos[a][0]+150,y=pos[a][1]+34,x2=pos[b][0];
+    p.setAttribute('d',`M ${x1} ${y} L ${x2-3} ${y}`);p.setAttribute('class','edge');p.setAttribute('marker-end','url(#ah)');svg.appendChild(p);
+  });
+  // loop arrow on stream
+  const lp=document.createElementNS(svgNS,'path');
+  lp.setAttribute('d','M 250 80 C 250 40, 420 40, 420 80');lp.setAttribute('class','edge');lp.setAttribute('marker-end','url(#ah)');lp.setAttribute('stroke-dasharray','4 4');svg.appendChild(lp);
+  const lt=document.createElementNS(svgNS,'text');lt.setAttribute('x',335);lt.setAttribute('y',34);lt.setAttribute('text-anchor','middle');lt.setAttribute('fill','#69788c');lt.setAttribute('font-size','10');lt.textContent='repeat per feature';svg.appendChild(lt);
+  ARCS.forEach(a=>{
+    const [x,y]=pos[a.id];
+    const g=document.createElementNS(svgNS,'g');g.setAttribute('class','node'+(a.id===state.arc?' sel':''));g.setAttribute('transform',`translate(${x},${y})`);
+    const hex=getComputedStyle(document.documentElement).getPropertyValue(a.color.replace('var(','').replace(')',''))||'#5cc8ff';
+    const rect=document.createElementNS(svgNS,'rect');rect.setAttribute('width',150);rect.setAttribute('height',68);rect.setAttribute('rx',12);rect.setAttribute('fill',hex.trim()+'22');rect.setAttribute('stroke',hex.trim());svg.appendChild;
+    g.appendChild(rect);
+    const t1=document.createElementNS(svgNS,'text');t1.setAttribute('class','arclabel');t1.setAttribute('x',14);t1.setAttribute('y',26);t1.setAttribute('fill',hex.trim());t1.textContent=a.label;g.appendChild(t1);
+    const t2=document.createElementNS(svgNS,'text');t2.setAttribute('class','nsub');t2.setAttribute('x',14);t2.setAttribute('y',46);t2.textContent=a.id==='bootstrap'?'once':a.id==='stream'?'the main loop':'continuous';g.appendChild(t2);
+    g.addEventListener('click',()=>{state.arc=a.id;render();});
+    svg.appendChild(g);
+  });
+  c.appendChild(svg);
+  const note=el('p','intro','<b>The big idea underneath all three:</b> "done" never means "the code was written." It means the change passed every check, was reviewed, deployed, and <b>proven to work in front of a user</b>.');
+  note.style.marginTop='16px';c.appendChild(note);
+}
+
+function renderParts(){
+  const c=$('#canvas');c.innerHTML='';
+  c.appendChild(el('h2','sec','Verity is made of 5 parts'));
+  c.appendChild(el('p','intro','Each part has one job. Together they take an idea all the way to proven-in-production. <b>Click a part</b> to see what it does (in plain terms).'));
+  const grid=el('div','subs');
+  SUBS.forEach(s=>{
+    const card=el('div','sub'+(s.id===state.sub?' sel':''));
+    card.style.borderColor=s.id===state.sub?s.color:'';
+    card.innerHTML=`<div class="nm"><span class="dot" style="background:${s.color}"></span>${s.name}</div><div class="one">${s.one}</div>`;
+    card.addEventListener('click',()=>{state.sub=s.id;render();});
+    grid.appendChild(card);
+  });
+  c.appendChild(grid);
+}
+
+function renderFollow(){
+  const c=$('#canvas');c.innerHTML='';
+  c.appendChild(el('h2','sec','Follow one change from idea to proven'));
+  c.appendChild(el('p','intro','This is the whole journey of a single feature — say, "add a profile page." Step through it.'));
+  const bar=el('div','walkbar');
+  const prev=el('button','btn','‹ Back');prev.addEventListener('click',()=>{state.step=Math.max(0,state.step-1);render();});
+  const next=el('button','btn primary','Next ›');next.addEventListener('click',()=>{state.step=Math.min(WALK.length-1,state.step+1);render();});
+  const reset=el('button','btn','↺ Start over');reset.addEventListener('click',()=>{state.step=0;render();});
+  bar.appendChild(prev);bar.appendChild(next);bar.appendChild(reset);c.appendChild(bar);
+  const w=el('div','walk');
+  WALK.forEach((s,i)=>{
+    const st=el('div','wstep'+(i<=state.step?' on':''));
+    st.appendChild(el('div','wn',i+1));
+    const tx=el('div');tx.appendChild(el('h4',null,`${s.h} &nbsp;<code>${s.c}</code>`));tx.appendChild(el('p',null,s.p));
+    st.appendChild(tx);w.appendChild(st);
+  });
+  c.appendChild(w);
+}
+
+function renderGloss(){
+  const c=$('#canvas');c.innerHTML='';
+  c.appendChild(el('h2','sec','Plain-English word list'));
+  c.appendChild(el('p','intro','Every techy word in this guide, in one place.'));
+  const terms=[
+    ['GitHub','A website where code is stored and its full history is kept. Verity treats it as the official record of everything.'],
+    ['Repo (repository)','The "home folder" for one project\'s code on GitHub.'],
+    ['Commit','A saved snapshot of a change, with a note describing it.'],
+    ['Branch','A separate copy of the code where you can work without disturbing the main version.'],
+    ['Pull Request (PR)','A request to fold a branch\'s changes into the main version — where review and checks happen.'],
+    ['Merge','Accepting a PR — folding the change into the main version. To Verity, this means "built."'],
+    ['CI (checks)','Robots that automatically run tests and scans on every change. Green = good.'],
+    ['Tag / Release','A labeled, official version (like v1.0.0) that\'s ready to ship.'],
+    ['Deploy','Putting the software online so people can actually use it.'],
+    ['CLI / the verity tool','A small program you run by typing commands. Verity\'s "notebook" that never forgets.'],
+    ['Staging','A practice copy of the live site, used to test a release before real users see it.'],
+    ['Kill-switch','An off-switch shipped with a risky new feature, so it can be turned on/off without redoing everything.'],
+  ];
+  const gl=el('div','gl');
+  terms.forEach(([t,d])=>{const g=el('div','g');g.innerHTML=`<b>${t}</b><p>${d}</p>`;gl.appendChild(g);});
+  c.appendChild(gl);
+}
+
+function renderDetail(){
+  const d=$('#detail');
+  if(state.tab==='parts'){
+    const s=SUB_BY[state.sub];
+    d.innerHTML=`<span class="ph" style="background:${s.color}22;color:${s.color}">${s.name}</span><h3>${s.name}</h3><p>${s.long}</p><div class="analogy">💡 ${s.analogy}</div><h5>In short</h5><ul>${s.facts.map(f=>`<li>${f}</li>`).join('')}</ul>`;
+    return;
+  }
+  if(state.tab==='how'){
+    const a=ARC_BY[state.arc];
+    d.innerHTML=`<span class="ph" style="background:${a.color}22;color:${a.color}">${a.label}</span><h3>${a.title}</h3><p style="color:var(--faint);font-size:12px;margin:-4px 0 8px">${a.when}</p><p>${a.long}</p><div class="analogy">💡 ${a.analogy}</div><h5>What happens</h5><ul>${a.facts.map(f=>`<li>${f}</li>`).join('')}</ul>`;
+    return;
+  }
+  if(state.tab==='follow'){
+    const s=WALK[state.step];
+    d.innerHTML=`<span class="ph" style="background:var(--note-bg);color:var(--note)">Step ${state.step+1} of ${WALK.length}</span><h3>${s.h}</h3><p>You (or the AI) runs <code class="gloss">${s.c}</code>.</p><p>${s.p}</p>${state.step===WALK.length-1?'<div class="analogy">🎉 That\'s the whole point of Verity: it didn\'t stop at "code written" — it proved the feature works for a real user.</div>':''}`;
+    return;
+  }
+  if(state.tab==='gloss'){
+    d.innerHTML=`<h3>Why a word list?</h3><p>Verity leans on a few tools (mainly <b>GitHub</b>) that have their own vocabulary. You don\'t need to master them — but knowing what each word means makes everything else click.</p><div class="analogy">You can use Verity by typing simple <code class="gloss">/verity:...</code> commands; it handles the GitHub plumbing for you.</div>`;
+    return;
+  }
+  // why
+  d.innerHTML=`<h3>The one-sentence version</h3><p>Verity is an AI that builds software the way a careful team would — through specialist roles, real checks, and a final reality check — so what you get is <b>actually running and proven</b>, not just written.</p><div class="analogy">💡 "Prompt to production, proven" — you describe it; Verity carries it all the way to working-in-the-real-world.</div><h5>Next</h5><ul><li>Open the <b>Usage Guide</b> to see exactly what to type.</li><li>It works with Claude Code and OpenCode.</li></ul>`;
+}
+
+function updatePrompt(){
+  let p='';
+  if(state.tab==='why') p='Explain, in very simple terms, why an "AI software delivery framework" like Verity is more useful than an AI that just writes code. Use an everyday analogy.';
+  else if(state.tab==='how'){const a=ARC_BY[state.arc];p=`Explain the "${a.title}" stage of the Verity framework to a beginner, with a simple analogy. What happens in this stage and why does it matter?`;}
+  else if(state.tab==='parts'){const s=SUB_BY[state.sub];p=`Explain Verity's "${s.name}" part to someone non-technical: ${s.one} Use a simple analogy and say why it matters.`;}
+  else if(state.tab==='follow'){const s=WALK[state.step];p=`In the Verity framework, explain this step of shipping a feature to a beginner: "${s.h}" (the command is ${s.c}). What does it do and why is it there?`;}
+  else p='Explain these software terms to a complete beginner, each in one friendly sentence: GitHub, repo, branch, pull request, merge, CI, tag/release, deploy, staging.';
+  $('#promptOut').value=p;
+}
+
+document.querySelectorAll('#tabs button').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tab)));
+$('#copyBtn').addEventListener('click',()=>{navigator.clipboard.writeText($('#promptOut').value).then(()=>{const b=$('#copyBtn');b.textContent='✓ Copied!';b.classList.add('done');setTimeout(()=>{b.textContent='Copy';b.classList.remove('done');},1400);});});
+render();
+</script>
+</body>
+</html>
