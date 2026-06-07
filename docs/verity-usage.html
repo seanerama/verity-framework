@@ -247,7 +247,19 @@ function cmdBox(text){ return `<div class="cmd">${text}<button class="mini" oncl
 function renderSetup(c){
   c.innerHTML='';
   c.appendChild(el('h2','sec','Set up Verity (one time)'));
-  c.appendChild(el('p','intro','Two steps. You\'ll need <b>Node.js</b> installed, plus the <code style="font-family:var(--mono);font-size:12px">git</code> and <code style="font-family:var(--mono);font-size:12px">gh</code> (GitHub) command-line tools. Then:'));
+  c.appendChild(el('p','intro','Verity runs <b>on GitHub</b>, so get a few things in place first — then it\'s two commands.'));
+  const pre=el('div');
+  pre.style.cssText='border:1px solid var(--line);border-radius:12px;padding:13px 15px;background:var(--panel2);margin-bottom:18px';
+  pre.innerHTML='<h4 style="margin:0 0 8px;font-size:13.5px">✅ Before you start</h4>'+
+    '<ul style="margin:0 0 11px;padding-left:18px;color:var(--dim);font-size:13px;line-height:1.7">'+
+    '<li>A <b>GitHub account</b> (free) — Verity stores your code and reads progress there.</li>'+
+    '<li><b>Node.js</b> 16 or newer.</li>'+
+    '<li><b>git</b> and the <b>GitHub CLI</b> (<code style="font-family:var(--mono);font-size:12px">gh</code>) installed.</li>'+
+    '<li><b>Sign in to GitHub from the CLI</b> — run <code style="font-family:var(--mono);font-size:12px">gh auth login</code> once. ⚠️ Installing <code style="font-family:var(--mono);font-size:12px">gh</code> is <i>not</i> the same as being signed in — skipping this causes confusing "not found" errors later.</li>'+
+    '</ul>'+
+    '<p style="margin:0 0 7px;color:var(--dim);font-size:12.6px"><b>Preflight check</b> — paste this in a terminal; all three lines should answer without errors:</p>'+
+    cmdBox('node -v && git --version && gh auth status');
+  c.appendChild(pre);
   const steps=el('div','steps');
   const s1=el('div','step');s1.innerHTML=`<div class="n"></div><div style="flex:1"><h4>Install the Verity tool</h4><p>This adds the <code style="font-family:var(--mono);font-size:12px">verity</code> command to your computer.</p>${cmdBox('npm i -g verity-framework')}</div>`;
   const s2=el('div','step');s2.innerHTML=`<div class="n"></div><div style="flex:1"><h4>Connect it to your AI assistant</h4><p>This teaches your AI the <code style="font-family:var(--mono);font-size:12px">${slash('vision')}</code>-style commands.</p>${cmdBox(installLine())}</div>`;
@@ -330,7 +342,7 @@ function updatePrompt(){
   const pb=$('#pbTitle'); const out=$('#promptOut');
   if(state.tab==='setup'){
     pb.textContent='📋 Copy the setup commands';
-    out.value=`# Verity setup (run in a terminal)\nnpm i -g verity-framework\n${installLine()}\n\n# then, in your AI assistant, start with:\n${slash('vision')}`;
+    out.value=`# 0. Preflight — all three should answer without errors:\nnode -v && git --version && gh auth status\n#    (if 'gh auth status' errors, run:  gh auth login)\n\n# 1. Install Verity\nnpm i -g verity-framework\n\n# 2. Connect it to your AI assistant\n${installLine()}\n\n# 3. In your AI assistant, start with:\n${slash('vision')}`;
   } else if(state.tab==='recipes'){
     const r=RECIPES[state.recipe];
     pb.textContent='📋 Copy this recipe';
