@@ -37,9 +37,15 @@ Continuous CD to STAGING on every merge; PROD is a deliberate cut release.
 4. **Deploy to STAGING** using the project's generated `deploy.sh`
    (pull pinned digests → additive migrate → up → verify).
 
-5. **UI-smoke "observably-works" GATE.** Run the project's headless-browser smoke of
-   the top user flows, asserting *behavior* (not just `/health`). **Fail → stop; do
-   not promote.** (Capability-gated: needs a headless browser in the runtime.)
+5. **UI-smoke "observably-works" GATE.** Drive the top user flows against staging,
+   asserting *behavior* (not just `/health`):
+   ```bash
+   verity smoke run --base-url <staging-url>   # flows live in .verity/smoke.json
+   ```
+   **`verified:false` → STOP; do not promote.** If it reports `gate: skipped` (no
+   headless browser available), that is NOT a pass — run `/verity:verify` (Handoff
+   Tester) manually before promoting. (`verity smoke init` scaffolds the flows;
+   needs Playwright in the project for the automated path.)
 
 6. **Promote to PROD** — human confirm-gate by default (`verity config get prod_promote`;
    set `auto` to skip). Same byte-identical digests. Flip any kill-switch dark→enabled
