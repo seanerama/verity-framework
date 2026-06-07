@@ -4,6 +4,7 @@
 // can't be forgotten on a feature.
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const { generateSlug, render } = require('./core.cjs');
 
@@ -94,6 +95,51 @@ function list(cwd) {
   return { stages };
 }
 
+// --- Stage Manager acts (branch / PR) ---
+
+function findStageFile(cwd, n) {
+  const dir = stageDir(cwd);
+  if (!fs.existsSync(dir)) {
+    return null;
+  }
+  return fs.readdirSync(dir).find((name) => stageNum(name) === n) || null;
+}
+
+function branchName(cwd, n) {
+  const file = findStageFile(cwd, n);
+  if (!file) {
+    throw new Error(`no stage ${n}`);
+  }
+  const slug = file.replace(/^stage-\d+-/, '').replace(/\.md$/, '');
+  return `feat/stage-${n}-${slug}`;
+}
+
+function acceptanceText(cwd, n) {
+  const file = findStageFile(cwd, n);
+  if (!file) {
+    throw new Error(`no stage ${n}`);
+  }
+  const text = fs.readFileSync(path.join(stageDir(cwd), file), 'utf8');
+  const m = text.match(/##\s+Acceptance conditions\s*\n([\s\S]*?)(?:\n##\s|$)/);
+  return (m ? m[1] : '').trim();
+}
+
+function prSpec(cwd, n, opts = {}) {
+  const file = findStageFile(cwd, n);
+  if (!file) {
+    throw new Error(`no stage ${n}`);
+  }
+  const text = fs.readFileSync(path.join(stageDir(cwd), file), 'utf8');
+  const title = (text.match(/^#\s+Stage\s+\d+:\s+(.+)$/m) || [])[1] || `stage ${n}`;
+  const closes = opts.issue ? `\n\nCloses #${opts.issue}` : '';
+  const body = `Stage ${n}.\n\n### Acceptance conditions\n${acceptanceText(cwd, n)}${closes}`;
+  return { title: `[stage ${n}] ${title.trim()}`, body, branch: branchName(cwd, n) };
+}
+
+function run(cmd, args, cwd) {
+  execFileSync(cmd, args, { stdio: 'inherit', cwd });
+}
+
 function dispatch(args, flags) {
   const cwd = flags.cwd || process.cwd();
   const verb = args[0];
@@ -103,7 +149,32 @@ function dispatch(args, flags) {
   if (verb === 'list') {
     return list(cwd);
   }
-  throw new Error(`unknown stage verb: ${verb || '(none)'} — use new|list`);
+  if (verb === 'branch') {
+    const name = branchName(cwd, Number(args[1]));
+    if (!flags['dry-run']) {
+      run('git', ['-C', cwd, 'checkout', '-b', name], cwd);
+    }
+    return { branch: name, created: !flags['dry-run'], raw: name };
+  }
+  if (verb === 'pr') {
+    const spec = prSpec(cwd, Number(args[1]), { issue: flags.issue });
+    if (!flags['dry-run']) {
+      run('gh', ['pr', 'create', '--title', spec.title, '--body', spec.body], cwd);
+    }
+    return { ...spec, opened: !flags['dry-run'] };
+  }
+  throw new Error(`unknown stage verb: ${verb || '(none)'} — use new|list|branch|pr`);
 }
 
-module.exports = { stageDir, nextNumber, acceptanceFor, create, list, dispatch };
+module.exports = {
+  stageDir,
+  nextNumber,
+  acceptanceFor,
+  create,
+  list,
+  findStageFile,
+  branchName,
+  acceptanceText,
+  prSpec,
+  dispatch,
+};
