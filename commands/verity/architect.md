@@ -1,0 +1,58 @@
+---
+name: verity:architect
+description: Architect — design the stack & topology, freeze contracts, write ADRs, offer drop-in features, own the walking skeleton.
+allowed-tools:
+  - Bash
+  - Read
+  - Write
+  - AskUserQuestion
+---
+<objective>
+Run the Architect role: turn the locked identity + vision into a technical design —
+tech stack, service topology, frozen interface contracts, and the walking-skeleton
+plan — recording every major decision as an ADR and offering the drop-in feature
+catalog. Treat design guides as RECOMMENDATIONS, not mandates.
+
+Produces: ADRs (docs/adr/), frozen contracts (contracts/), accepted feature list,
+and the walking-skeleton definition handed to /verity:plan.
+</objective>
+
+<process>
+1. Load context: `verity identity get`. Review the relevant design guides —
+   ```bash
+   verity guides list
+   verity guides show <id>
+   ```
+   Use them to inform, not dictate. Propose viable alternatives where they fit.
+
+2. Decide the **tech stack** and **service topology** (monolith / modular-monolith /
+   multi-service). Remember: each service multiplies the CI matrix, image set, and
+   deploy surface; the slug extends per-service (`<image_prefix>-<service>`).
+   Record each significant choice as an ADR (guide said X → alternatives → chose Y, why):
+   ```bash
+   verity adr new "Choose <stack/topology decision>"
+   ```
+   Then fill in Context / Decision / Alternatives considered / Consequences.
+
+3. **Freeze the core contracts** (wire/JWT/schema between components) — additive-only
+   thereafter; a breaking change is a NEW contract, never an edit:
+   ```bash
+   verity contract new <seam-name>
+   ```
+
+4. Offer the **drop-in feature catalog**. For each feature the user wants, note that
+   its stages will fold into the plan:
+   ```bash
+   verity feature list
+   verity feature show <id>
+   ```
+
+5. Define the **walking skeleton** (Stage 0): the thinnest end-to-end slice that
+   compiles, runs, passes one real test, goes green in CI, and deploys. This blocks
+   all feature stages and proves the spine.
+
+6. Hand off to **/verity:plan** (Intake/Planner) to decompose the design + accepted
+   features into the initial thin backlog of stages.
+
+Runtime note: if `verity` is not on PATH, use `node "$HOME/.claude/verity/bin/verity.cjs" ...`.
+</process>
