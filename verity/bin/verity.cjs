@@ -20,6 +20,8 @@ const ledger = require('./lib/ledger.cjs');
 const review = require('./lib/review.cjs');
 const release = require('./lib/release.cjs');
 const status = require('./lib/status.cjs');
+const security = require('./lib/security.cjs');
+const handoff = require('./lib/handoff.cjs');
 
 function parseArgs(argv) {
   const positional = [];
@@ -129,6 +131,12 @@ const COMMANDS = {
   },
   status(rest, flags) {
     return status.dispatch(rest, flags);
+  },
+  security(rest, flags) {
+    return security.dispatch(rest, flags);
+  },
+  handoff(rest, flags) {
+    return handoff.dispatch(rest, flags);
   },
 };
 
