@@ -1,5 +1,7 @@
 // Integration tests: spawn the real dispatcher, the way a harness would.
 const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const CLI = path.join(__dirname, '..', 'verity', 'bin', 'verity.cjs');
@@ -40,4 +42,20 @@ test('unknown command exits non-zero', () => {
     failed = true;
   }
   assert(failed, 'unknown command should exit non-zero');
+});
+
+test('identity lock + get round-trip via CLI (no network)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-cli-id-'));
+  run(['identity', 'lock', 'My App', 'my-app', '--owner', 'acme', '--cwd', tmp]);
+  const out = JSON.parse(run(['identity', 'get', '--cwd', tmp]));
+  assertEqual(out.manifest.slug, 'my-app');
+  assertEqual(out.manifest.image_prefix, 'ghcr.io/acme/my-app');
+});
+
+test('--raw on a structured result emits JSON, never [object Object]', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-cli-raw-'));
+  run(['config', 'ensure', '--cwd', tmp]);
+  const out = run(['config', 'get', '--raw', '--cwd', tmp]).trim();
+  assert(!out.includes('[object Object]'), 'must not stringify an object naively');
+  assert(out.includes('model_profile'), 'should emit the config as JSON');
 });
