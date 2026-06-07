@@ -15,6 +15,7 @@ const install = require('./lib/install.cjs');
 const adr = require('./lib/adr.cjs');
 const contract = require('./lib/contract.cjs');
 const catalog = require('./lib/catalog.cjs');
+const stage = require('./lib/stage.cjs');
 
 function parseArgs(argv) {
   const positional = [];
@@ -109,6 +110,9 @@ const COMMANDS = {
   },
   feature(rest) {
     return catalog.featureDispatch(rest);
+  },
+  stage(rest, flags) {
+    return stage.dispatch(rest, flags);
   },
 };
 
