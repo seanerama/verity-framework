@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Verity — Flow Diagram</title>
+<style>
+  :root{
+    --bg:#0c1018; --panel:#141b27; --panel2:#1b2433; --line:#283449;
+    --txt:#e8eef6; --dim:#9fb0c4; --faint:#69788c;
+    --setup:#5cc8ff; --design:#b083f0; --build:#3ddc97; --ship:#ff7eb6; --gate:#ffc14d;
+    --note:#3ddc97; --note-bg:#08291d;
+    --mono:'SF Mono',ui-monospace,'Cascadia Code','JetBrains Mono',Menlo,Consolas,monospace;
+    --ui:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--ui);font-size:14.5px;line-height:1.5}
+  .wrap{max-width:1180px;margin:0 auto;padding:24px 22px 70px}
+  header .badge{display:inline-block;font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--setup);border:1px solid #14385a;background:#082236;padding:3px 9px;border-radius:20px;font-weight:600}
+  header h1{font-size:27px;margin:10px 0 2px;letter-spacing:-.4px}
+  header h1 .v{color:var(--note)}
+  header p.lead{color:var(--dim);font-size:14px;margin:8px 0 0;max-width:780px}
+
+  .toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:20px 0 6px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .seg button{appearance:none;background:var(--panel);border:none;color:var(--dim);padding:9px 16px;cursor:pointer;font-size:13.5px;font-family:var(--ui)}
+  .seg button.on{background:var(--note);color:#06241a;font-weight:700}
+  .seg button:not(.on):hover{color:var(--txt);background:var(--panel2)}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--dim);margin-left:auto}
+  .legend span{display:inline-flex;align-items:center;gap:5px}
+  .legend i{width:22px;height:15px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:700}
+
+  .flowwrap{margin-top:14px}
+  h2.title{font-size:18px;margin:0 0 3px}
+  p.sub{color:var(--dim);font-size:13px;margin:0 0 16px}
+
+  /* single-column flow */
+  .flow{display:flex;flex-direction:column;align-items:stretch;max-width:640px;margin:0 auto}
+  .node{border:1px solid var(--line);border-radius:13px;background:var(--panel);padding:0;overflow:hidden;cursor:pointer;transition:border-color .12s}
+  .node:hover{border-color:var(--note)}
+  .node.open{border-color:var(--note)}
+  .node .hd{display:flex;align-items:center;gap:12px;padding:13px 15px}
+  .node .kind{flex:0 0 auto;width:26px;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#06141f}
+  .node .cmd{font-family:var(--mono);font-size:13px;font-weight:600}
+  .node .ttl{color:var(--dim);font-size:12.6px;margin-left:auto;text-align:right;max-width:48%}
+  .node .body{display:none;padding:2px 15px 14px 53px;color:var(--dim);font-size:12.9px}
+  .node.open .body{display:block}
+  .node .body code{font-family:var(--mono);font-size:11.5px;background:#0a0e16;border:1px solid var(--line);padding:1px 6px;border-radius:5px;color:var(--setup)}
+  .phase{font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;font-weight:700;margin:14px 0 7px;padding-left:3px}
+  .conn{align-self:center;color:var(--faint);font-size:16px;line-height:1;padding:5px 0}
+  .converge{align-self:stretch;text-align:center;margin:14px 0;padding:10px;border:1px dashed var(--gate);border-radius:11px;background:#1d1a0c;color:#f2e2b8;font-size:13px;font-weight:600}
+
+  /* compare two columns */
+  .cmp{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  @media(max-width:760px){.cmp{grid-template-columns:1fr}}
+  .cmpcol h3{font-size:15px;margin:0 0 4px;display:flex;align-items:center;gap:8px}
+  .cmpcol .h{font-size:12px;color:var(--faint);margin:0 0 12px}
+  .mini{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:10px 12px;margin-bottom:0}
+  .mini .cmd{font-family:var(--mono);font-size:12.5px;font-weight:600}
+  .mini .ttl{color:var(--dim);font-size:11.8px;margin-top:3px}
+  .mini .kind{display:inline-block;font-size:8.5px;font-weight:700;padding:1px 5px;border-radius:4px;color:#06141f;margin-right:6px;vertical-align:middle}
+  .cmini{align-self:center;text-align:center;color:var(--faint);font-size:14px;padding:4px}
+  .sharedband{margin:18px 0 0;border:1px solid var(--build);border-radius:13px;background:#0c2419;padding:14px 16px}
+  .sharedband h3{margin:0 0 4px;font-size:15px;color:var(--build)}
+  .sharedband p{margin:0 0 12px;color:#cfe7d9;font-size:12.8px}
+  .sharedrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .chip{border:1px solid var(--line);background:var(--panel);border-radius:9px;padding:7px 11px;font-family:var(--mono);font-size:12px}
+  .chip .t{display:block;font-family:var(--ui);font-size:10.5px;color:var(--faint);margin-top:2px}
+  .arrow{color:var(--faint)}
+
+  .promptbox{margin-top:22px;background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:14px 16px}
+  .promptbox .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .promptbox h4{margin:0;font-size:12.5px;color:var(--dim);font-weight:600}
+  .promptbox textarea{width:100%;min-height:120px;background:#0a0e16;border:1px solid var(--line);border-radius:8px;color:#c9d6e3;font-family:var(--mono);font-size:11.8px;padding:10px;resize:vertical;line-height:1.55}
+  .copy{appearance:none;border:1px solid var(--line);background:var(--panel2);color:var(--txt);border-radius:7px;padding:6px 13px;cursor:pointer;font-size:12px}
+  .copy:hover{border-color:var(--note);color:var(--note)}.copy.done{border-color:var(--note);color:var(--note)}
+  .foot{margin-top:16px;color:var(--faint);font-size:11.5px;text-align:center}.foot a{color:var(--setup)}
+  .note{margin-top:14px;color:var(--faint);font-size:12px;border-left:3px solid var(--line);padding:4px 0 4px 12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="badge">Flow Diagram</span>
+    <h1><span class="v">Verity</span> — two ways to start</h1>
+    <p class="lead">Starting <b>from scratch</b> and adding Verity to an <b>existing project</b> begin differently — but they quickly merge into the exact same build-and-ship loop. Toggle below; click any step for detail.</p>
+  </header>
+
+  <div class="toolbar">
+    <div class="seg" id="view">
+      <button data-v="scratch" class="on">🌱 From scratch</button>
+      <button data-v="existing">🏚️ Existing project</button>
+      <button data-v="compare">⇄ Compare</button>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--setup)">⌨</i>terminal</span>
+      <span><i style="background:var(--build)">AI</i>type to your AI</span>
+      <span><i style="background:var(--gate)">✓</i>gate</span>
+    </div>
+  </div>
+
+  <div class="flowwrap" id="flow"></div>
+
+  <div class="promptbox">
+    <div class="top"><h4 id="pbt">📋 Copy this flow as a checklist</h4><button class="copy" id="copyBtn">Copy</button></div>
+    <textarea id="promptOut" readonly></textarea>
+  </div>
+
+  <p class="foot">Verity · <span style="font-family:var(--mono)">npm: verity-framework</span> · see also the Overview &amp; Usage guides. <a href="https://github.com/seanerama/verity-framework">github.com/seanerama/verity-framework</a></p>
+</div>
+
+<script>
+/* kind: term=terminal, ai=type to AI, gate=milestone */
+const SETUP = { n:'Install Verity', kind:'term', phase:'Set up', cmd:'npm i -g verity-framework', phaseColor:'var(--setup)',
+  plain:'Install the tool, then connect it to your AI assistant with <code>verity install --claude</code> (or <code>--opencode</code>). One time. Requires a GitHub account + <code>gh</code> signed in.' };
+
+const SCRATCH_BOOT = [
+  SETUP,
+  { n:'Create the project', kind:'ai', phase:'Design', cmd:'/verity:vision', phaseColor:'var(--design)',
+    plain:'Names the project, checks the name is free, <b>creates a new GitHub repo</b>, and scaffolds a starter project with hygiene checks (CI) already wired in.' },
+  { n:'Design + walking skeleton', kind:'ai', phase:'Design', cmd:'/verity:architect', phaseColor:'var(--design)',
+    plain:'Choose the tech, freeze the contracts between parts, record decisions (ADRs), and build the <b>walking skeleton</b> — a tiny end-to-end slice that goes green in CI and deploys, proving the pipeline before any features.' },
+];
+const EXISTING_BOOT = [
+  SETUP,
+  { n:'Give your repo a Verity identity', kind:'term', phase:'Adopt', cmd:'verity identity lock', phaseColor:'var(--setup)',
+    plain:'Your repo already exists, so you <b>don\'t</b> run <code>/verity:vision</code>. Instead lock the identity on the repo you have: <code>verity identity lock "&lt;Name&gt;" &lt;slug&gt; --owner &lt;you&gt;</code>. No new repo is created.' },
+  { n:'Add the missing spine', kind:'term', phase:'Adopt', cmd:'verity scaffold init', phaseColor:'var(--setup)',
+    plain:'Adds only the pieces you\'re missing — CI workflow, issue templates, a STATUS file, config. It <b>skips files you already have and never touches your code</b>.' },
+  { n:'Capture the existing design', kind:'ai', phase:'Adopt', cmd:'/verity:architect', phaseColor:'var(--design)',
+    plain:'Write down your current architecture as decision records and <b>freeze the contracts</b> between existing parts, so future changes stay safe. (Optional helpers: <code>/verity:security</code>, <code>verity map</code> for orientation.)' },
+  { n:'Get existing code green in CI', kind:'gate', phase:'Adopt', cmd:'first green', phaseColor:'var(--gate)',
+    plain:'Make your <b>existing</b> code pass the new hygiene checks before starting new feature work — so problems surface now, incrementally, not in a big pile later.' },
+];
+const SHARED = [
+  { n:'Plan a feature', kind:'ai', phase:'Build loop', cmd:'/verity:plan', phaseColor:'var(--build)',
+    plain:'Turn a request into a clear task with a built-in definition of "done" (features auto-get a kill-switch + a "prove it works" check). The only place tasks are born.' },
+  { n:'Build it', kind:'ai', phase:'Build loop', cmd:'/verity:build', phaseColor:'var(--build)',
+    plain:'Build the task on its own branch, open a PR, get the checks green. Never merges its own work.' },
+  { n:'Review & merge', kind:'ai', phase:'Build loop', cmd:'/verity:review', phaseColor:'var(--build)',
+    plain:'A separate, skeptical reviewer checks the real code against the done-list + security rules, then merges. Refuses if CI is red.', loopEnd:true },
+  { n:'Cut & deploy a release', kind:'ai', phase:'Ship', cmd:'/verity:ship', phaseColor:'var(--ship)',
+    plain:'Stamp a version, deploy to staging, then (with your OK) to production. Records exactly what\'s live.' },
+  { n:'Prove it works (live)', kind:'ai', phase:'Ship', cmd:'/verity:verify', phaseColor:'var(--ship)',
+    plain:'Drive the live app like a real user to confirm the feature actually works. If it can\'t truly check, it says "not a pass" — never pretends.' },
+];
+
+const KIND={term:{bg:'var(--setup)',t:'⌨'},ai:{bg:'var(--build)',t:'AI'},gate:{bg:'var(--gate)',t:'✓'}};
+const state={view:'scratch',open:null};
+const $=s=>document.querySelector(s);
+function el(t,c,h){const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;}
+
+function steps(view){ return view==='scratch'?[...SCRATCH_BOOT,...SHARED]:[...EXISTING_BOOT,...SHARED]; }
+
+function setView(v){state.view=v;state.open=null;document.querySelectorAll('#view button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));render();}
+
+function render(){ const f=$('#flow');f.innerHTML=''; state.view==='compare'?renderCompare(f):renderSingle(f); updatePrompt(); }
+
+function renderSingle(f){
+  const list=steps(state.view);
+  f.appendChild(el('h2','title',state.view==='scratch'?'🌱 Start a project from scratch':'🏚️ Add Verity to an existing project'));
+  f.appendChild(el('p','sub',state.view==='scratch'?'A brand-new project: Verity creates the repo and scaffolds everything.':'An existing codebase: Verity slots its "spine" in around your code without disturbing it.'));
+  const flow=el('div','flow');
+  let lastPhase=null;
+  list.forEach((s,i)=>{
+    if(s.phase!==lastPhase){ const p=el('div','phase',s.phase);p.style.color=s.phaseColor;flow.appendChild(p);lastPhase=s.phase; }
+    else if(i>0){ flow.appendChild(el('div','conn','↓')); }
+    const k=KIND[s.kind];
+    const node=el('div','node'+(state.open===i?' open':''));
+    node.innerHTML=`<div class="hd"><span class="kind" style="background:${k.bg}">${k.t}</span><span class="cmd" style="color:${s.phaseColor}">${s.cmd}</span><span class="ttl">${s.n}</span></div><div class="body">${s.plain}</div>`;
+    node.addEventListener('click',()=>{state.open=state.open===i?null:i;render();});
+    flow.appendChild(node);
+    if(s.loopEnd){ flow.appendChild(el('div','converge','↻ repeat plan → build → review for every feature, then ship')); }
+  });
+  f.appendChild(flow);
+  if(state.view==='existing'){
+    f.appendChild(el('div','note','Note: v0.1.0 has no fully-automated "analyze my whole codebase" command — adopting an existing project is the install → identity → scaffold → architect path above (scaffold only adds missing files; it never overwrites your code).'));
+  }
+}
+
+function miniCard(s){
+  const k=KIND[s.kind];
+  return `<div class="mini"><div class="cmd" style="color:${s.phaseColor}"><span class="kind" style="background:${k.bg}">${k.t}</span>${s.cmd}</div><div class="ttl">${s.n}</div></div>`;
+}
+function renderCompare(f){
+  f.appendChild(el('h2','title','⇄ Same destination, different on-ramp'));
+  f.appendChild(el('p','sub','The two starts differ only in how Verity\'s spine gets into place. After that, every project runs the identical loop.'));
+  const cmp=el('div','cmp');
+  const c1=el('div','cmpcol');c1.innerHTML='<h3>🌱 From scratch</h3><p class="h">Verity creates the repo</p>';
+  SCRATCH_BOOT.forEach((s,i)=>{ if(i>0)c1.appendChild(el('div','cmini','↓')); c1.appendChild(el('div',null,miniCard(s))); });
+  const c2=el('div','cmpcol');c2.innerHTML='<h3>🏚️ Existing project</h3><p class="h">Verity slots in around your code</p>';
+  EXISTING_BOOT.forEach((s,i)=>{ if(i>0)c2.appendChild(el('div','cmini','↓')); c2.appendChild(el('div',null,miniCard(s))); });
+  cmp.appendChild(c1);cmp.appendChild(c2);
+  f.appendChild(cmp);
+  f.appendChild(el('div','converge','⇣ from here, both paths are IDENTICAL ⇣'));
+  const band=el('div','sharedband');
+  band.innerHTML='<h3>The shared loop — for every project</h3><p>Once the spine is in place, new and existing projects are indistinguishable. This repeats for each feature, then ships.</p>';
+  const row=el('div','sharedrow');
+  SHARED.forEach((s,i)=>{ if(i>0)row.appendChild(el('span','arrow',i===3?' → then →':'→')); row.appendChild(el('div','chip',`${s.cmd}<span class="t">${s.n}</span>`)); });
+  band.appendChild(row);
+  f.appendChild(band);
+}
+
+function updatePrompt(){
+  const pb=$('#pbt'),out=$('#promptOut');
+  if(state.view==='compare'){
+    pb.textContent='📋 Copy both flows';
+    const a=SCRATCH_BOOT.map((s,i)=>`  ${i+1}. ${s.cmd}  — ${s.n}`).join('\n');
+    const b=EXISTING_BOOT.map((s,i)=>`  ${i+1}. ${s.cmd}  — ${s.n}`).join('\n');
+    const sh=SHARED.map(s=>`  → ${s.cmd}  — ${s.n}`).join('\n');
+    out.value=`VERITY — two on-ramps, one shared loop\n\nFROM SCRATCH:\n${a}\n\nEXISTING PROJECT:\n${b}\n\nTHEN (identical for both — repeat plan→build→review per feature):\n${sh}`;
+  } else {
+    const list=steps(state.view);
+    pb.textContent='📋 Copy this flow as a checklist';
+    out.value=`VERITY — ${state.view==='scratch'?'start from scratch':'add to an existing project'}\n\n`+list.map((s,i)=>`${i+1}. ${s.cmd}\n   ${s.n}`).join('\n');
+  }
+}
+
+document.querySelectorAll('#view button').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.v)));
+$('#copyBtn').addEventListener('click',()=>{navigator.clipboard.writeText($('#promptOut').value).then(()=>{const b=$('#copyBtn');b.textContent='✓ Copied!';b.classList.add('done');setTimeout(()=>{b.textContent='Copy';b.classList.remove('done');},1400);});});
+render();
+</script>
+</body>
+</html>
