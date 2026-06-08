@@ -31,6 +31,7 @@ Self-contained HTML — clone/download the repo and open them in any browser (no
 - [`docs/verity-usage.html`](docs/verity-usage.html) — **Usage**: install + command-by-command recipes + pro tips (Claude Code / OpenCode toggle)
 - [`docs/verity-flows.html`](docs/verity-flows.html) — **Flows**: start-from-scratch vs add-to-an-existing-project, side by side
 - [`docs/verity-flows.drawio`](docs/verity-flows.drawio) — the flow diagram as an editable draw.io / diagrams.net file
+- [`docs/commands.md`](docs/commands.md) — **Command reference**: all 13 `/verity:*` role commands and what each one does
 
 ## Subsystems
 - **Relay** — role orchestration + the stream loop + dependency engine
@@ -48,6 +49,9 @@ Self-contained HTML — clone/download the repo and open them in any browser (no
 
 ## Package
 `verity-framework` (npm) · CLI binary: `verity` · Node ≥16 · host deps: `git`, `gh`
+
+## Contributing
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) — local setup, the test/lint checks, project layout, and conventions.
 
 ## License
 MIT
