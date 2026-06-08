@@ -32,6 +32,7 @@ Self-contained HTML — clone/download the repo and open them in any browser (no
 - [`docs/verity-flows.html`](docs/verity-flows.html) — **Flows**: start-from-scratch vs add-to-an-existing-project, side by side
 - [`docs/verity-flows.drawio`](docs/verity-flows.drawio) — the flow diagram as an editable draw.io / diagrams.net file
 - [`docs/commands.md`](docs/commands.md) — **Command reference**: all 13 `/verity:*` role commands and what each one does
+- [`docs/explainer-kit.md`](docs/explainer-kit.md) — **Explainer kit**: a briefing for an AI to describe Verity to humans (podcast/deck/talk) — story, diagrams, soundbites, fact sheet
 
 ## Subsystems
 - **Relay** — role orchestration + the stream loop + dependency engine
