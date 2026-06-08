@@ -1,0 +1,79 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram name="Verity — two on-ramps, one loop" id="verity-flows">
+    <mxGraphModel dx="900" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="700" pageHeight="1120" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Verity — two ways to start, one shared loop" style="text;html=1;align=center;fontStyle=1;fontSize=16;fontColor=#1f2937;" vertex="1" parent="1">
+          <mxGeometry x="180" y="8" width="360" height="26" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_install" value="&lt;b&gt;Install&lt;/b&gt;&lt;br&gt;npm i -g verity-framework&lt;br&gt;verity install --claude | --opencode" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dff1ff;strokeColor=#3a9fe0;fontColor=#0b3a5b;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="230" y="48" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="h_scratch" value="🌱 From scratch" style="text;html=1;align=center;fontStyle=1;fontSize=13;fontColor=#8e5cd9;" vertex="1" parent="1">
+          <mxGeometry x="60" y="140" width="240" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="h_exist" value="🏚️ Existing project" style="text;html=1;align=center;fontStyle=1;fontSize=13;fontColor=#3a9fe0;" vertex="1" parent="1">
+          <mxGeometry x="400" y="140" width="240" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_vision" value="&lt;b&gt;/verity:vision&lt;/b&gt;&lt;br&gt;create the repo + scaffold" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#efe3ff;strokeColor=#8e5cd9;fontColor=#3a1d63;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="170" width="240" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="n_archS" value="&lt;b&gt;/verity:architect&lt;/b&gt;&lt;br&gt;design + walking skeleton" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#efe3ff;strokeColor=#8e5cd9;fontColor=#3a1d63;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="270" width="240" height="56" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_id" value="&lt;b&gt;verity identity lock&lt;/b&gt;&lt;br&gt;adopt your existing repo (no new repo)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dff1ff;strokeColor=#3a9fe0;fontColor=#0b3a5b;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="400" y="170" width="240" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="n_scaf" value="&lt;b&gt;verity scaffold init&lt;/b&gt;&lt;br&gt;add missing spine (skips your files)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dff1ff;strokeColor=#3a9fe0;fontColor=#0b3a5b;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="400" y="270" width="240" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="n_archE" value="&lt;b&gt;/verity:architect&lt;/b&gt;&lt;br&gt;capture design + freeze contracts" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#efe3ff;strokeColor=#8e5cd9;fontColor=#3a1d63;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="400" y="370" width="240" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="n_fg" value="&lt;b&gt;first green&lt;/b&gt;&lt;br&gt;existing code passes CI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3d6;strokeColor=#e0a93a;fontColor=#5b4410;fontSize=12;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="400" y="470" width="240" height="56" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_conv" value="⇣ identical from here — every project runs the same loop ⇣" style="text;html=1;align=center;fontStyle=1;fontColor=#a06a00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="170" y="585" width="360" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_plan" value="&lt;b&gt;/verity:plan&lt;/b&gt;&lt;br&gt;turn a request into a task" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfbed;strokeColor=#1faf73;fontColor=#0c3d29;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="230" y="630" width="240" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="n_build" value="&lt;b&gt;/verity:build&lt;/b&gt;&lt;br&gt;branch → PR → CI green (never merges)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfbed;strokeColor=#1faf73;fontColor=#0c3d29;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="230" y="720" width="240" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="n_review" value="&lt;b&gt;/verity:review&lt;/b&gt;&lt;br&gt;verify vs source → merge (refuses on red CI)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfbed;strokeColor=#1faf73;fontColor=#0c3d29;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="230" y="810" width="240" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="n_ship" value="&lt;b&gt;/verity:ship&lt;/b&gt;&lt;br&gt;cut release → deploy → record what's live" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe3f1;strokeColor=#e057a0;fontColor=#5b1038;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="230" y="920" width="240" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="n_verify" value="&lt;b&gt;/verity:verify&lt;/b&gt;&lt;br&gt;drive the live app — prove it works" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe3f1;strokeColor=#e057a0;fontColor=#5b1038;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="230" y="1010" width="240" height="56" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_install" target="n_vision"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_install" target="n_id"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_vision" target="n_archS"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_id" target="n_scaf"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_scaf" target="n_archE"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_archE" target="n_fg"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_archS" target="n_plan"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_fg" target="n_plan"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_plan" target="n_build"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_build" target="n_review"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_review" target="n_ship"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#8895a7;" edge="1" parent="1" source="n_ship" target="n_verify"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_loop" value="repeat per feature" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;dashed=1;strokeColor=#1faf73;fontColor=#1faf73;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="n_review" target="n_plan"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
