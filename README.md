@@ -25,7 +25,7 @@ Then, in your AI assistant, start a project with `/verity:vision`.
 
 ## Guides (interactive, beginner-friendly)
 
-Self-contained HTML — open locally, or browse them once GitHub Pages is enabled (see below):
+Self-contained HTML — clone/download the repo and open them in any browser (no server or internet needed):
 
 - [`docs/verity-overview.html`](docs/verity-overview.html) — **Overview**: what Verity is, the mental model, how it works (no jargon assumed)
 - [`docs/verity-usage.html`](docs/verity-usage.html) — **Usage**: install + command-by-command recipes + pro tips (Claude Code / OpenCode toggle)
