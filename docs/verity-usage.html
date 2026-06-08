@@ -211,6 +211,8 @@ const CMDS = [
    cli:'verity golive'},
 ];
 const CMD_BY=Object.fromEntries(CMDS.map(c=>[c.id,c]));
+/* the formal role each command runs (the command name is short; the role is the specialist) */
+const ROLE={vision:'Vision',architect:'Architect',plan:'Intake / Planner',build:'Stage Manager',review:'Reviewer / Integrator',ship:'Release / Deploy Operator',verify:'Handoff Tester',test:'Project Tester',security:'Security Auditor',docs:'Technical Writer',sre:'SRE',map:'Codebase Mapper',golive:'Pre-Go-Live Gate'};
 
 const RECIPES = {
   new:{ icon:'🌱', name:'Start a brand-new app', sub:'idea → running, proven',
@@ -313,7 +315,7 @@ function renderCommands(){
   c.appendChild(el('p','intro','Click a command on the left. There are 13 — each is one specialist role.'));
   const cmd=CMD_BY[state.cmd];
   const d=el('div','cdetail');
-  d.innerHTML=`<h3>${slash(cmd.id)}</h3><p>${cmd.plain}</p>
+  d.innerHTML=`<h3>${slash(cmd.id)} <span style="font-family:var(--mono);font-size:12px;color:var(--faint);font-weight:400">· ${ROLE[cmd.id]}</span></h3><p>${cmd.plain}</p>
     <h5>Expert tip</h5><div class="tip">💡 ${cmd.tip}</div>
     <h5>What the tool does behind the scenes</h5><div class="cmd" style="white-space:normal">${cmd.cli}</div>`;
   c.appendChild(d);
