@@ -6,7 +6,7 @@ Verity is a CI/CD-native, GitHub-native, production-lifecycle AI software delive
 
 Most AI coding tools stop when the code is written. Verity keeps going until the software is tested, deployed, and **proven working in front of a user**. It runs a project as a sequence of specialized AI roles (architect, builder, reviewer, release operator, verifier…) that hand work off through clear contracts, with GitHub as the source of truth.
 
-> **Status:** published — [`verity-framework@0.2.0`](https://www.npmjs.com/package/verity-framework) on npm. 13 role commands, the full Relay/Ledger/Gate/Shipyard/Verify engine, adapters for Claude Code + OpenCode, and the deployment-methods catalog (see below).
+> **Status:** published — [`verity-framework@0.2.1`](https://www.npmjs.com/package/verity-framework) on npm. 13 role commands, the full Relay/Ledger/Gate/Shipyard/Verify engine, adapters for Claude Code + OpenCode, and the deployment-methods catalog (see below).
 
 ## Install
 

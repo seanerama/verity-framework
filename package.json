@@ -1,6 +1,6 @@
 {
   "name": "verity-framework",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Verity — a CI/CD-native, GitHub-native, production-lifecycle AI software delivery framework.",
   "keywords": ["verity", "ai", "ci-cd", "github", "devops", "agent", "framework"],
   "author": "Sean Mahoney",
