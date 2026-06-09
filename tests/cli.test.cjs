@@ -71,10 +71,25 @@ test('scaffold init via CLI produces the file set', () => {
 
 test('install --claude --target via CLI lays down the command', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-cli-inst-'));
-  const out = JSON.parse(run(['install', '--claude', '--target', tmp]));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-cli-inst-home-'));
+  const out = JSON.parse(run(['install', '--claude', '--target', tmp, '--home', home]));
   assertEqual(out.harness, 'claude');
   assert(
     fs.existsSync(path.join(tmp, 'commands', 'verity', 'vision.md')),
     'vision command installed',
   );
+  assert(
+    fs.existsSync(path.join(home, 'deployment-methods.md')),
+    'global deployment catalog seeded',
+  );
+});
+
+test('deployment list via CLI returns the shipped samples', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-cli-dep-'));
+  const out = JSON.parse(run(['deployment', 'list', '--home', home]));
+  assert(
+    out.methods.some((m) => m.id === 'aws-ec2'),
+    'aws-ec2 sample present',
+  );
+  assertEqual(out.hasConfigured, false, 'shipped samples are examples, not configured');
 });

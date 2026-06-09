@@ -3,9 +3,18 @@ const os = require('node:os');
 const path = require('node:path');
 const install = require('../verity/bin/lib/install.cjs');
 
+// `home` keeps the global deployment-methods seed inside the test sandbox instead
+// of the real ~/.verity.
+function sandbox(tag) {
+  return {
+    target: fs.mkdtempSync(path.join(os.tmpdir(), `verity-${tag}-`)),
+    home: fs.mkdtempSync(path.join(os.tmpdir(), `verity-${tag}-home-`)),
+  };
+}
+
 test('installClaude lays down command files + engine internals', () => {
-  const target = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-inst-'));
-  const r = install.installClaude({ target });
+  const { target, home } = sandbox('inst');
+  const r = install.installClaude({ target, home });
   assertEqual(r.harness, 'claude');
   assert(
     r.installed.some((p) => p.endsWith('vision.md')),
@@ -21,9 +30,22 @@ test('installClaude lays down command files + engine internals', () => {
   );
 });
 
+test('install seeds the global deployment-methods catalog (setup step)', () => {
+  const { target, home } = sandbox('inst-deploy');
+  const r = install.installClaude({ target, home });
+  assert(r.deploymentMethods.created, 'catalog seeded on a fresh home');
+  assert(
+    fs.existsSync(path.join(home, 'deployment-methods.md')),
+    'catalog on disk under ~/.verity',
+  );
+  // Reinstall must NOT clobber the user's edited catalog.
+  const second = install.installClaude({ target, home });
+  assertEqual(second.deploymentMethods.created, false, 'reinstall does not reseed');
+});
+
 test('installClaude does not require touching the real home dir', () => {
-  const target = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-inst2-'));
-  const r = install.installClaude({ target });
+  const { target, home } = sandbox('inst2');
+  const r = install.installClaude({ target, home });
   assert(r.target === target, 'must install into the provided target');
 });
 
@@ -58,9 +80,10 @@ test('transformForOpenCode reduces frontmatter to description, drops allowed-too
 });
 
 test('installOpenCode flattens commands to command/verity-*.md and copies internals', () => {
-  const target = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-oc-'));
-  const r = install.installOpenCode({ target });
+  const { target, home } = sandbox('oc');
+  const r = install.installOpenCode({ target, home });
   assertEqual(r.harness, 'opencode');
+  assert(r.deploymentMethods.created, 'OpenCode install also seeds the global catalog');
   assert(
     fs.existsSync(path.join(target, 'command', 'verity-vision.md')),
     'flattened command installed',
@@ -74,7 +97,7 @@ test('installOpenCode flattens commands to command/verity-*.md and copies intern
 });
 
 test('dispatch --opencode routes to the OpenCode adapter', () => {
-  const target = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-oc2-'));
-  const r = install.dispatch([], { opencode: true, target });
+  const { target, home } = sandbox('oc2');
+  const r = install.dispatch([], { opencode: true, target, home });
   assertEqual(r.harness, 'opencode');
 });
