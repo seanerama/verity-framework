@@ -162,9 +162,9 @@ const CMDS = [
    tip:'It locks the name as the project\'s permanent identity — picking a good, available name here saves pain later.',
    cli:'verity identity check / lock, verity scaffold init'},
   {id:'architect',group:'set up',what:'Design the approach',
-   plain:'Chooses the tech, decides how many moving parts there are, freezes the "contracts" between them, and writes down each decision (and why). Also defines the tiny first slice to prove the pipeline.',
-   tip:'It suggests proven patterns from built-in guides but will recommend alternatives — every deviation gets logged as a decision record.',
-   cli:'verity adr new, verity contract new, verity guides/feature list'},
+   plain:'Chooses the tech, decides how many moving parts there are, freezes the "contracts" between them, and writes down each decision (and why). It also picks where the app will deploy — from your deployment-methods catalog — and defines the tiny first slice to prove the pipeline.',
+   tip:'It suggests proven patterns from built-in guides but will recommend alternatives — every deviation gets logged as a decision record. For deployment it picks from YOUR catalog rather than grabbing whatever host its tools happen to expose.',
+   cli:'verity adr new, verity contract new, verity deployment list / init-access, verity guides/feature list'},
   {id:'plan',group:'build loop',what:'Turn a request into a task',
    plain:'The ONLY place tasks are born. You describe a feature or bug; it writes a clear task with a built-in definition of "done" and opens a tracking ticket.',
    tip:'New features automatically get a kill-switch and a "prove it works" check baked into their done-list — you can\'t forget them.',
@@ -271,6 +271,10 @@ function renderSetup(c){
   const note=el('p','intro','💡 <b>Two flavors of command.</b> The <code style="font-family:var(--mono);font-size:12px">${...}</code> shell commands above you type in a terminal. The <code style="font-family:var(--mono);font-size:12px">'+slash('vision')+'</code>-style commands you type into your AI assistant\'s chat.');
   note.style.marginTop='18px';note.innerHTML='💡 <b>Two flavors of command.</b> The shell commands above (like <code style="font-family:var(--mono);font-size:12px">npm i -g verity-framework</code>) you type in a <b>terminal</b>. The <code style="font-family:var(--mono);font-size:12px">'+slash('vision')+'</code>-style commands you type into your <b>AI assistant\'s chat</b>.';
   c.appendChild(note);
+  const dep=el('div');
+  dep.style.cssText='border:1px solid var(--line);border-left:3px solid var(--purple);border-radius:8px;padding:11px 14px;background:var(--panel2);margin-top:14px;color:var(--dim);font-size:12.8px';
+  dep.innerHTML='🚀 <b>Deployment methods, seeded for you.</b> Install also creates <code style="font-family:var(--mono);font-size:12px">~/.verity/deployment-methods.md</code> — your catalog of places you can deploy to (it ships with an AWS-EC2-over-SSH and a local-server example). Edit it with <code style="font-family:var(--mono);font-size:12px">verity deployment edit</code> to add your real targets. When you design an app, the Architect reads this and helps you choose one — recording <b>locations</b>, never secrets.';
+  c.appendChild(dep);
 }
 
 function renderRecipes(){
@@ -330,6 +334,7 @@ function renderTips(c){
     ['Never let the author approve their own work','Always run a separate <code>'+slash('review')+'</code> pass. The independent, skeptical look at the real code is where most bugs die.'],
     ['"Skipped" is not "passed"','If the live check (<code>'+slash('verify')+'</code>) can\'t run, it says NOT a pass. Don\'t promote to real users on a skipped check — verify by hand.'],
     ['Ship risky features dark','New features come with a kill-switch (off by default). Ship the code "dark," then flip it on — so a problem is one switch away from off, not a redo.'],
+    ['Decide where it deploys — don\'t let the AI guess','Keep your real deploy targets in <code>verity deployment list</code> (seeded at install, edit with <code>verity deployment edit</code>). The Architect picks from them and records the choice — instead of grabbing whatever host happens to be wired into its tools. Host/credential details stay out of git: the per-app access file is gitignored and shared out-of-band.'],
     ['Freeze contracts early','Once the connections between parts are frozen, only add to them — never break them. That\'s what lets you change things later without everything falling over.'],
     ['Prove the pipeline first','Don\'t build features until the tiny end-to-end "walking skeleton" is green and deployed. Proving the machine works first prevents a giant pile-up of broken stuff later.'],
     ['Let each role stay in its lane','Resist making one mega-prompt do everything. The handoffs (plan → build → review → ship) are what keep quality high.'],

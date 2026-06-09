@@ -196,9 +196,9 @@ const SUBS = [
     analogy:'Like a bouncer with a checklist: no green check, no entry — no exceptions for the owner\'s friends.',
     facts:['Tests must be green','Security rules verified against the real code','The author cannot approve their own change'] },
   { id:'shipyard', name:'Shipyard', color:'var(--shipyard)', one:'Where code becomes a running release that real people can use.',
-    long:'Shipyard turns accepted code into a real, running version: it stamps a version number, packages it, deploys it, and writes down <b>exactly what is live right now</b> (so anyone can see the current state at a glance).',
+    long:'Shipyard turns accepted code into a real, running version: it stamps a version number, packages it, deploys it, and writes down <b>exactly what is live right now</b> (so anyone can see the current state at a glance). <i>Where</i> it deploys comes from your <b>deployment-methods catalog</b> — a saved list of the places you can deploy to — so the target is a deliberate choice, not a guess.',
     analogy:'Like a factory\'s shipping dock: it boxes the product, sends it out, and logs what went where.',
-    facts:['Version + changelog generated automatically','Tries it on a practice copy first, then the real one','Keeps an honest record of what is currently live'] },
+    facts:['Version + changelog generated automatically','Deploys to a target you chose from your saved list','Tries it on a practice copy first, then the real one','Keeps an honest record of what is currently live'] },
   { id:'verify', name:'Verify', color:'var(--verify)', one:'The reality check — drives the app like a real user to prove it works.',
     long:'The most important idea in Verity. "The code compiled" is not the same as "the feature works." Verify actually <b>opens the app and clicks the button</b> like a person would, to confirm the thing really works. If it can\'t check, it honestly says "not verified" — it never pretends.',
     analogy:'Like test-driving the car off the lot, not just trusting that the engine light is off.',
@@ -211,7 +211,7 @@ const ARCS = [
     title:'Bootstrap — set up and PROVE the pipeline', when:'Happens once, at the very start.',
     long:'Before building any features, Verity sets the project up and proves the whole "build → test → ship" machine actually works on a tiny example. You name the project, it creates the code home (the repo), designs the rough shape, and gets a <b>thinnest-possible working slice</b> all the way to "running and checked." Only then do features begin.',
     analogy:'Like building 10 feet of a factory assembly line and running one toy product all the way through — before mass production.',
-    facts:['Name + create the project','Design the approach (and write down the "why")','Get a tiny end-to-end slice green and running first'] },
+    facts:['Name + create the project','Design the approach (and write down the "why")','Choose where it will deploy, from your saved options','Get a tiny end-to-end slice green and running first'] },
   { id:'stream', label:'2 · Build (loop)', color:'var(--note)',
     title:'Stream — build features, one loop at a time', when:'The main, repeating part of the work.',
     long:'Every feature flows through the <b>same short loop</b>: describe it → build it on its own copy → checks run → a reviewer approves it → it gets merged in. Then the next feature. Each one rides the proven machine from step 1.',
@@ -353,6 +353,7 @@ function renderGloss(){
     ['CLI / the verity tool','A small program you run by typing commands. Verity\'s "notebook" that never forgets.'],
     ['Staging','A practice copy of the live site, used to test a release before real users see it.'],
     ['Kill-switch','An off-switch shipped with a risky new feature, so it can be turned on/off without redoing everything.'],
+    ['Deployment methods','Your saved list of places you can deploy to (a cloud box, a local server…). Verity picks from it instead of guessing — and keeps the access details out of GitHub.'],
   ];
   const gl=el('div','gl');
   terms.forEach(([t,d])=>{const g=el('div','g');g.innerHTML=`<b>${t}</b><p>${d}</p>`;gl.appendChild(g);});

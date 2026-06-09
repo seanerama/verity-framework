@@ -25,7 +25,7 @@ Lock what you're building before any code is written.
 | Command | Role | What it does |
 | --- | --- | --- |
 | `/verity:vision` | Vision | Clarify the idea, lock the project identity, and scaffold the repo with an honest hygiene CI. **Start here.** |
-| `/verity:architect` | Architect | Turn the locked identity + vision into a technical design — stack & topology, frozen interface contracts, ADRs — and own the walking skeleton. |
+| `/verity:architect` | Architect | Turn the locked identity + vision into a technical design — stack & topology, frozen interface contracts, ADRs, the deployment target (from your `verity deployment` catalog) — and own the walking skeleton. |
 
 ## Plan & Build
 

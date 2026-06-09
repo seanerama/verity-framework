@@ -6,7 +6,7 @@ Verity is a CI/CD-native, GitHub-native, production-lifecycle AI software delive
 
 Most AI coding tools stop when the code is written. Verity keeps going until the software is tested, deployed, and **proven working in front of a user**. It runs a project as a sequence of specialized AI roles (architect, builder, reviewer, release operator, verifier…) that hand work off through clear contracts, with GitHub as the source of truth.
 
-> **Status:** published — [`verity-framework@0.1.0`](https://www.npmjs.com/package/verity-framework) on npm. 13 role commands, the full Relay/Ledger/Gate/Shipyard/Verify engine, and adapters for Claude Code + OpenCode.
+> **Status:** published — [`verity-framework@0.2.0`](https://www.npmjs.com/package/verity-framework) on npm. 13 role commands, the full Relay/Ledger/Gate/Shipyard/Verify engine, adapters for Claude Code + OpenCode, and the deployment-methods catalog (see below).
 
 ## Install
 
@@ -23,6 +23,42 @@ node -v && git --version && gh auth status
 
 Then, in your AI assistant, start a project with `/verity:vision`.
 
+## Deployment methods
+
+**What it is.** A catalog of the places *you* can deploy to (an AWS box, a server on your LAN, a managed host…), plus a per-app record of where each project actually runs. Verity reads it when the **Architect** designs an app, so deployment becomes a *deliberate choice you make* — not an accident.
+
+**Why it exists.** Without it, an AI agent picks a host by whatever happens to be lying around — e.g. suggesting Render.com simply because a Render tool is installed in its environment. That's not a decision; it's a coincidence. The catalog makes the Architect ask *"here's what you can deploy to — which one for this app?"*, and record the answer as an [ADR](docs/commands.md). It also keeps host and credential details **out of git** while still letting a team share them safely.
+
+**Two files, two scopes:**
+
+| | Global catalog | Per-app access |
+|---|---|---|
+| **Path** | `~/.verity/deployment-methods.md` | `.verity/deploy-access.md` |
+| **Scope** | You, across *every* project | One app |
+| **Holds** | The deploy targets you *can* use | How to reach *this* app's host |
+| **Created** | At `verity install` (seeded once, never overwritten) | Written by the Architect, per app |
+| **In git?** | No — lives in your home dir | **No — gitignored.** A committed, secret-free pointer (`.verity/deploy-access.README.md`) tells teammates who lack it to ask the project admin |
+
+> 🔒 **Both files reference credential *locations*, never secrets.** Point at a key file (`~/.ssh/prod.pem`), an SSO profile, or a secret-store entry — never paste an actual key, password, or token. The real per-app file is shared out-of-band (not through the repo), so nothing sensitive ever lands in git history. (Same rule as `STATUS.md`.)
+
+**How to use it.** The global catalog is seeded at install with two worked examples (AWS EC2 over SSH, and a local-network server) — edit it to describe *your* real targets:
+
+```bash
+verity deployment list          # what targets you have (the Architect reads this)
+verity deployment show aws-ec2  # one method's details
+verity deployment path          # where the catalog file lives
+verity deployment edit          # open it in $EDITOR to add/adjust targets
+```
+
+When the Architect designs an app it runs `verity deployment list`, helps you **pick a target** (recording it as an ADR), and — if nothing real is configured yet — **asks how you want to deploy and offers suggestions**. It then sets up the per-app access file:
+
+```bash
+verity deployment init-access   # gitignore the real file + commit the "ask the admin" pointer
+verity deployment access        # is the access file present on this machine? if not, who to ask
+```
+
+…and writes `.verity/deploy-access.md` with how to reach this app's host. The **Release/Deploy Operator** (`/verity:ship`) consumes that target when it builds the deploy step.
+
 ## Guides (interactive, beginner-friendly)
 
 Self-contained HTML — clone/download the repo and open them in any browser (no server or internet needed):
@@ -36,7 +72,7 @@ Self-contained HTML — clone/download the repo and open them in any browser (no
 
 ## Subsystems
 - **Relay** — role orchestration + the stream loop + dependency engine
-- **Shipyard** — CI/CD spine + Release/Deploy Operator + runtime truth (`STATUS.md`)
+- **Shipyard** — CI/CD spine + Release/Deploy Operator + deployment-methods catalog + runtime truth (`STATUS.md`)
 - **Ledger** — GitHub-derived state engine (no stale files)
 - **Gate** — review + security + the quality gates
 - **Verify** — live "observably-works" verification

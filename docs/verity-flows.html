@@ -119,7 +119,7 @@ const SCRATCH_BOOT = [
   { n:'Create the project', kind:'ai', phase:'Design', cmd:'/verity:vision', phaseColor:'var(--design)',
     plain:'Names the project, checks the name is free, <b>creates a new GitHub repo</b>, and scaffolds a starter project with hygiene checks (CI) already wired in.' },
   { n:'Design + walking skeleton', kind:'ai', phase:'Design', cmd:'/verity:architect', phaseColor:'var(--design)',
-    plain:'Choose the tech, freeze the contracts between parts, record decisions (ADRs), and build the <b>walking skeleton</b> — a tiny end-to-end slice that goes green in CI and deploys, proving the pipeline before any features.' },
+    plain:'Choose the tech, freeze the contracts between parts, record decisions (ADRs), <b>pick where the app deploys</b> from your deployment-methods catalog (<code>verity deployment list</code> — not whatever host its tools happen to expose), and build the <b>walking skeleton</b> — a tiny end-to-end slice that goes green in CI and deploys, proving the pipeline before any features.' },
 ];
 const EXISTING_BOOT = [
   SETUP,
@@ -128,7 +128,7 @@ const EXISTING_BOOT = [
   { n:'Add the missing spine', kind:'term', phase:'Adopt', cmd:'verity scaffold init', phaseColor:'var(--setup)',
     plain:'Adds only the pieces you\'re missing — CI workflow, issue templates, a STATUS file, config. It <b>skips files you already have and never touches your code</b>.' },
   { n:'Capture the existing design', kind:'ai', phase:'Adopt', cmd:'/verity:architect', phaseColor:'var(--design)',
-    plain:'Write down your current architecture as decision records and <b>freeze the contracts</b> between existing parts, so future changes stay safe. (Optional helpers: <code>/verity:security</code>, <code>verity map</code> for orientation.)' },
+    plain:'Write down your current architecture as decision records, <b>freeze the contracts</b> between existing parts, and <b>pick the deployment target</b> from your catalog (<code>verity deployment list</code>) — recording how this app\'s host is reached, kept out of git. (Optional helpers: <code>/verity:security</code>, <code>verity map</code> for orientation.)' },
   { n:'Get existing code green in CI', kind:'gate', phase:'Adopt', cmd:'first green', phaseColor:'var(--gate)',
     plain:'Make your <b>existing</b> code pass the new hygiene checks before starting new feature work — so problems surface now, incrementally, not in a big pile later.' },
 ];
@@ -174,7 +174,7 @@ function renderSingle(f){
   });
   f.appendChild(flow);
   if(state.view==='existing'){
-    f.appendChild(el('div','note','Note: v0.1.0 has no fully-automated "analyze my whole codebase" command — adopting an existing project is the install → identity → scaffold → architect path above (scaffold only adds missing files; it never overwrites your code).'));
+    f.appendChild(el('div','note','Note: v0.2.0 has no fully-automated "analyze my whole codebase" command — adopting an existing project is the install → identity → scaffold → architect path above (scaffold only adds missing files; it never overwrites your code).'));
   }
 }
 
