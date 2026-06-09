@@ -7,7 +7,16 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const deployment = require('./deployment.cjs');
+
 const PKG_ROOT = path.join(__dirname, '..', '..', '..');
+
+// Part of setup: seed the user-global deployment-methods catalog (NEVER clobbered).
+// It lives in the user's home (~/.verity), independent of the harness target dir.
+function seedDeploymentMethods(opts) {
+  const seed = deployment.ensure({ home: opts.home });
+  return { ...seed, label: `${seed.path}${seed.created ? '' : ' (existing)'}` };
+}
 
 function commandFiles(srcCommands) {
   return fs.readdirSync(srcCommands).filter((n) => n.endsWith('.md'));
@@ -38,7 +47,11 @@ function installClaude(opts = {}) {
   copyInternals(target);
   installed.push('verity/');
 
-  return { harness: 'claude', target, installed };
+  // 3. Seed the global deployment-methods catalog (setup step).
+  const deploymentMethods = seedDeploymentMethods(opts);
+  installed.push(deploymentMethods.label);
+
+  return { harness: 'claude', target, installed, deploymentMethods };
 }
 
 // --- OpenCode adapter ---
@@ -85,17 +98,20 @@ function installOpenCode(opts = {}) {
   copyInternals(target);
   installed.push('verity/');
 
-  return { harness: 'opencode', target, installed };
+  const deploymentMethods = seedDeploymentMethods(opts);
+  installed.push(deploymentMethods.label);
+
+  return { harness: 'opencode', target, installed, deploymentMethods };
 }
 
 function dispatch(_args, flags) {
   if (flags.opencode) {
-    return installOpenCode({ target: flags.target });
+    return installOpenCode({ target: flags.target, home: flags.home });
   }
   if (flags.codex || flags.gemini) {
     throw new Error('only the claude and opencode adapters are implemented so far');
   }
-  return installClaude({ target: flags.target });
+  return installClaude({ target: flags.target, home: flags.home });
 }
 
 module.exports = {
