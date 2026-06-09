@@ -75,18 +75,34 @@ function changelogFrom(commits, version) {
   return lines.join('\n').trim();
 }
 
+// Prepend a changelog section, returning a rollback that restores the file to its
+// exact prior state (content, or non-existence) — so a later failure can undo it.
 function prependChangelog(cwd, section) {
   const p = path.join(cwd, 'CHANGELOG.md');
+  const existedBefore = fs.existsSync(p);
+  const before = existedBefore ? fs.readFileSync(p, 'utf8') : null;
   const header = '# Changelog';
-  const existing = fs.existsSync(p) ? fs.readFileSync(p, 'utf8').replace(header, '').trim() : '';
+  const existing = before ? before.replace(header, '').trim() : '';
   const body = `${header}\n\n${section}\n\n${existing}`.trim();
   fs.writeFileSync(p, `${body}\n`);
+  return () => {
+    if (existedBefore) {
+      fs.writeFileSync(p, before);
+    } else {
+      fs.rmSync(p, { force: true });
+    }
+  };
 }
 
 function run(cmd, args) {
   execFileSync(cmd, args, { stdio: 'inherit' });
 }
 
+// A release has three side effects (tag, changelog edit, push) that must be
+// all-or-nothing: a half-done release leaves either a dirty CHANGELOG.md with no
+// tag, or a local tag that never pushed. We order them cheap-and-reversible-first
+// (tag → changelog → push) and roll back the earlier steps if a later one throws.
+// The git runner is injectable (opts.run) so partial failure is unit-testable.
 function cut(cwd, opts = {}) {
   const tags = opts.tags || gitTags(cwd);
   const previous = ledger.latestTag(tags);
@@ -94,14 +110,34 @@ function cut(cwd, opts = {}) {
   const tag = `v${version}`;
   const commits = opts.commits || commitsSince(cwd, previous);
   const changelog = changelogFrom(commits, version);
-  if (!opts.dryRun) {
-    prependChangelog(cwd, changelog);
-    run('git', ['-C', cwd, 'tag', tag]);
-    if (opts.push !== false) {
-      run('git', ['-C', cwd, 'push', 'origin', tag]);
+  const result = { version, tag, previous, changelog, commitCount: commits.length };
+  if (opts.dryRun) {
+    return { ...result, applied: false };
+  }
+
+  const exec = opts.run || run;
+  exec('git', ['-C', cwd, 'tag', tag]); // step 1 — if this throws, nothing changed yet
+
+  let restoreChangelog;
+  try {
+    restoreChangelog = prependChangelog(cwd, changelog); // step 2
+  } catch (err) {
+    exec('git', ['-C', cwd, 'tag', '-d', tag]); // roll back step 1
+    throw err;
+  }
+
+  if (opts.push !== false) {
+    try {
+      exec('git', ['-C', cwd, 'push', 'origin', tag]); // step 3
+    } catch (err) {
+      restoreChangelog(); // roll back step 2
+      exec('git', ['-C', cwd, 'tag', '-d', tag]); // roll back step 1
+      throw new Error(
+        `release push failed — rolled back tag ${tag} and CHANGELOG.md, working tree is clean. Original error: ${err.message}`,
+      );
     }
   }
-  return { version, tag, previous, changelog, commitCount: commits.length, applied: !opts.dryRun };
+  return { ...result, applied: true };
 }
 
 function current(cwd) {

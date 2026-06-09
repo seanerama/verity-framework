@@ -68,6 +68,30 @@ test('a failing flow fails the gate', () => {
   assert(r.flows.find((f) => f.name === 'broken').error.includes('dead button'));
 });
 
+// --- capability probe: detects more than the local node_modules/.bin ---
+test('defaultProbe finds a browser in the local node_modules/.bin', () => {
+  const d = fresh();
+  const bin = path.join(d, 'node_modules', '.bin');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'playwright'), '');
+  const r = smoke.defaultProbe(d, { PATH: '' });
+  assert(r.available && r.tool === 'playwright', 'local .bin still detected');
+});
+
+test('defaultProbe finds a globally-installed browser on PATH (not just local .bin)', () => {
+  const d = fresh(); // empty project — no local node_modules
+  const pathDir = fresh();
+  fs.writeFileSync(path.join(pathDir, 'playwright'), '');
+  const r = smoke.defaultProbe(d, { PATH: pathDir });
+  assert(r.available && r.tool === 'playwright', 'PATH-installed tool detected');
+});
+
+test('defaultProbe reports unavailable when nothing is found (degrades, never false green)', () => {
+  const r = smoke.defaultProbe(fresh(), { PATH: '' });
+  assertEqual(r.available, false);
+  assertEqual(r.tool, null);
+});
+
 test('runSmoke with no spec throws', () => {
   let failed = false;
   try {

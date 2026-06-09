@@ -43,6 +43,81 @@ test('cut --dry-run computes version + changelog without tagging (injected tags/
   assert(r.changelog.includes('### Features'), 'changelog generated');
 });
 
+// --- release: side effects are transactional (tag → changelog → push, with rollback) ---
+test('cut applies in order: tag, changelog written, then push', () => {
+  const d = fresh('rel-apply');
+  const calls = [];
+  const r = release.cut(d, {
+    tags: ['v0.1.0'],
+    commits: ['feat: a'],
+    run: (cmd, args) => calls.push([cmd, ...args].join(' ')),
+  });
+  assertEqual(r.applied, true);
+  assertEqual(r.tag, 'v0.1.1');
+  // tag before push
+  const tagIdx = calls.findIndex((c) => c.includes('tag v0.1.1'));
+  const pushIdx = calls.findIndex((c) => c.includes('push origin v0.1.1'));
+  assert(tagIdx >= 0 && pushIdx > tagIdx, 'tags before pushing');
+  assert(
+    fs.readFileSync(path.join(d, 'CHANGELOG.md'), 'utf8').includes('## 0.1.1'),
+    'changelog written',
+  );
+});
+
+test('cut rolls back tag + changelog when push fails (no prior CHANGELOG)', () => {
+  const d = fresh('rel-rollback');
+  const calls = [];
+  let threw = false;
+  try {
+    release.cut(d, {
+      tags: [],
+      commits: ['feat: a'],
+      run: (cmd, args) => {
+        const line = [cmd, ...args].join(' ');
+        calls.push(line);
+        if (line.includes('push')) {
+          throw new Error('network down');
+        }
+      },
+    });
+  } catch (_e) {
+    threw = true;
+  }
+  assert(threw, 'push failure surfaces as an error');
+  assert(
+    !fs.existsSync(path.join(d, 'CHANGELOG.md')),
+    'CHANGELOG.md removed on rollback (did not exist before)',
+  );
+  assert(
+    calls.some((c) => c.includes('tag -d v0.0.1')),
+    'the tag is deleted on rollback',
+  );
+});
+
+test('cut restores a pre-existing CHANGELOG.md exactly on push failure', () => {
+  const d = fresh('rel-restore');
+  const original = '# Changelog\n\n## 0.0.1\n\n### Features\n- old\n';
+  fs.writeFileSync(path.join(d, 'CHANGELOG.md'), original);
+  try {
+    release.cut(d, {
+      tags: ['v0.0.1'],
+      commits: ['feat: new'],
+      run: (cmd, args) => {
+        if ([cmd, ...args].join(' ').includes('push')) {
+          throw new Error('rejected');
+        }
+      },
+    });
+  } catch (_e) {
+    /* expected */
+  }
+  assertEqual(
+    fs.readFileSync(path.join(d, 'CHANGELOG.md'), 'utf8'),
+    original,
+    'changelog restored byte-for-byte',
+  );
+});
+
 // --- status: runtime truth artifact ---
 test('status set writes runtime.json and renders STATUS.md', () => {
   const d = fresh('status');

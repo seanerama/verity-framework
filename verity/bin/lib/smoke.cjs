@@ -78,9 +78,36 @@ function buildScript(baseUrl, flow) {
   return lines.join('\n');
 }
 
-function defaultProbe(cwd) {
+function resolvableFrom(pkg, cwd) {
+  try {
+    require.resolve(pkg, { paths: [cwd, process.cwd()] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function onPath(bin, pathDirs) {
+  const exts = process.platform === 'win32' ? ['.cmd', '.exe', '.bat', ''] : [''];
+  return pathDirs.some((d) => exts.some((e) => fs.existsSync(path.join(d, bin + e))));
+}
+
+// Capability probe — is a headless browser usable here? Checks three honest sources
+// so we don't false-skip when the tool is installed in a non-local layout:
+//   1. the project's local node_modules/.bin
+//   2. resolvable as a package from cwd (hoisted / monorepo / npm-linked global)
+//   3. a CLI on PATH (a globally-installed playwright)
+// Pure (no execution). If none match it returns unavailable, and runSmoke degrades
+// to a non-pass — never a false green. Callers can bypass detection entirely by
+// injecting opts.probe / opts.driver into runSmoke (e.g. a project-specific runner).
+function defaultProbe(cwd, env = process.env) {
+  const pathDirs = (env.PATH || '').split(path.delimiter).filter(Boolean);
   for (const bin of ['playwright', 'puppeteer']) {
-    if (fs.existsSync(path.join(cwd, 'node_modules', '.bin', bin))) {
+    if (
+      fs.existsSync(path.join(cwd, 'node_modules', '.bin', bin)) ||
+      resolvableFrom(bin, cwd) ||
+      onPath(bin, pathDirs)
+    ) {
       return { available: true, tool: bin };
     }
   }
