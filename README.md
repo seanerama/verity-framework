@@ -2,93 +2,92 @@
 
 **Prompt to production, proven.**
 
-Verity is a CI/CD-native, GitHub-native, production-lifecycle AI software delivery framework — a clean-room successor to [spec-driven-devops](https://www.npmjs.com/package/spec-driven-devops) 1.4 for projects that go *beyond MVP* into real, operated production.
+Most AI coding tools stop when the code is written — leaving you to find out later whether it runs, deploys, or actually works. **Verity keeps going.** It carries a project from an idea all the way to software that is tested, deployed, and **proven working in front of a real user** — and then keeps it running.
 
-Most AI coding tools stop when the code is written. Verity keeps going until the software is tested, deployed, and **proven working in front of a user**. It runs a project as a sequence of specialized AI roles (architect, builder, reviewer, release operator, verifier…) that hand work off through clear contracts, with GitHub as the source of truth.
+It does that by running your project as a sequence of specialized AI roles — a vision assistant, an architect, a builder, a reviewer, a release operator, a verifier, and more — that hand work to each other through clear contracts, with **GitHub as the single source of truth**. It's CI/CD-native and GitHub-native by design, built for projects going *beyond a prototype* into real, operated production. (Verity is a clean-room successor to [spec-driven-devops](https://www.npmjs.com/package/spec-driven-devops) 1.4.)
 
-> **Status:** published — [`verity-framework@0.2.1`](https://www.npmjs.com/package/verity-framework) on npm. 13 role commands, the full Relay/Ledger/Gate/Shipyard/Verify engine, adapters for Claude Code + OpenCode, and the deployment-methods catalog (see below).
+> 📦 On npm as [`verity-framework`](https://www.npmjs.com/package/verity-framework) · works with **Claude Code** and **OpenCode**.
+
+## What makes it different
+
+- **"Done" means proven, not written.** Every change is reviewed, deployed, and driven like a real user before it counts as finished.
+- **The AI decides; a deterministic tool records.** The `verity` CLI is the "notebook" that never forgets — it holds the rules and the official state, so a forgetful model (or a brand-new chat) can always pick up exactly where things left off.
+- **State is read from GitHub, never a file that drifts.** A merged PR *is* "built"; a tag *is* "released." Nothing to hand-maintain, nothing to lie about.
+- **Specialist roles with real handoffs** beat one mega-prompt trying to do everything.
+
+## How it works
+
+A Verity project moves through three arcs:
+
+1. **Bootstrap** *(once)* — name the project, create the repo, design the architecture, choose where it deploys, and prove the whole build→ship pipeline on a tiny end-to-end "walking skeleton."
+2. **Stream** *(the loop)* — every feature flows through the same short cycle: **plan → build → review → merge**, riding that proven pipeline.
+3. **Operate** *(continuous)* — cut releases, deploy, **verify on the live app**, and keep it healthy.
+
+Five subsystems carry that out:
+
+| Subsystem | Job |
+|---|---|
+| **Relay** | Orchestrates the roles, the stream loop, and the dependency engine |
+| **Shipyard** | The CI/CD spine — releases, deploys, the deployment-methods catalog, and runtime truth (`STATUS.md`) |
+| **Ledger** | Derives state from GitHub, so nothing goes stale |
+| **Gate** | Review, security, and the quality gates |
+| **Verify** | Live "observably-works" verification |
 
 ## Install
 
-```bash
-npm i -g verity-framework
-verity install --claude       # or: --opencode
-```
-
-**Prerequisites:** a GitHub account · Node ≥16 · `git` and the GitHub CLI (`gh`) installed **and signed in** (`gh auth login` — installing `gh` is not the same as being authenticated). Preflight:
+**Prerequisites:** a GitHub account · Node ≥16 · `git` and the GitHub CLI (`gh`) installed **and signed in** (run `gh auth login` once — installing `gh` is not the same as being authenticated).
 
 ```bash
+# preflight — all three should answer without error:
 node -v && git --version && gh auth status
+
+# install, then connect it to your assistant:
+npm i -g verity-framework
+verity install --claude        # or: --opencode
 ```
 
-Then, in your AI assistant, start a project with `/verity:vision`.
+Then, in your AI assistant, start a project with `/verity:vision`. The [interactive guides](#guides) walk through it step by step.
 
 ## Deployment methods
 
-**What it is.** A catalog of the places *you* can deploy to (an AWS box, a server on your LAN, a managed host…), plus a per-app record of where each project actually runs. Verity reads it when the **Architect** designs an app, so deployment becomes a *deliberate choice you make* — not an accident.
+Verity makes **where your app deploys a deliberate choice**, not an accident. Left alone, an AI agent picks a host by whatever happens to be wired into its environment — suggesting Render.com, say, just because a Render tool is installed. The deployment-methods catalog fixes that: the **Architect** reads your saved targets and works with you to choose one (recording it as an ADR), and if none are configured yet it asks how you want to deploy and offers suggestions.
 
-**Why it exists.** Without it, an AI agent picks a host by whatever happens to be lying around — e.g. suggesting Render.com simply because a Render tool is installed in its environment. That's not a decision; it's a coincidence. The catalog makes the Architect ask *"here's what you can deploy to — which one for this app?"*, and record the answer as an [ADR](docs/commands.md). It also keeps host and credential details **out of git** while still letting a team share them safely.
-
-**Two files, two scopes:**
+It's **two files, two scopes** — and crucially, no secrets ever touch git:
 
 | | Global catalog | Per-app access |
 |---|---|---|
 | **Path** | `~/.verity/deployment-methods.md` | `.verity/deploy-access.md` |
 | **Scope** | You, across *every* project | One app |
 | **Holds** | The deploy targets you *can* use | How to reach *this* app's host |
-| **Created** | At `verity install` (seeded once, never overwritten) | Written by the Architect, per app |
-| **In git?** | No — lives in your home dir | **No — gitignored.** A committed, secret-free pointer (`.verity/deploy-access.README.md`) tells teammates who lack it to ask the project admin |
+| **Created** | At `verity install` — seeded once, never overwritten | Written by the Architect, per app |
+| **In git?** | No (lives in your home dir) | **No — gitignored.** A committed, secret-free pointer tells teammates who lack it to ask the project admin |
 
-> 🔒 **Both files reference credential *locations*, never secrets.** Point at a key file (`~/.ssh/prod.pem`), an SSO profile, or a secret-store entry — never paste an actual key, password, or token. The real per-app file is shared out-of-band (not through the repo), so nothing sensitive ever lands in git history. (Same rule as `STATUS.md`.)
+> 🔒 Both files reference credential **locations** — a key file like `~/.ssh/prod.pem`, an SSO profile, a secret-store entry — never an actual key, password, or token. The per-app file is shared out-of-band, so nothing sensitive lands in git history. (Same rule as `STATUS.md`.)
 
-**How to use it.** The global catalog is seeded at install with two worked examples (AWS EC2 over SSH, and a local-network server) — edit it to describe *your* real targets:
-
-```bash
-verity deployment list          # what targets you have (the Architect reads this)
-verity deployment show aws-ec2  # one method's details
-verity deployment path          # where the catalog file lives
-verity deployment edit          # open it in $EDITOR to add/adjust targets
-```
-
-When the Architect designs an app it runs `verity deployment list`, helps you **pick a target** (recording it as an ADR), and — if nothing real is configured yet — **asks how you want to deploy and offers suggestions**. It then sets up the per-app access file:
+The global catalog ships with two worked examples (AWS EC2 over SSH, and a local-network server). Edit it to describe your real targets:
 
 ```bash
-verity deployment init-access   # gitignore the real file + commit the "ask the admin" pointer
-verity deployment access        # is the access file present on this machine? if not, who to ask
+verity deployment list           # your targets (this is what the Architect reads)
+verity deployment show aws-ec2   # one target's details
+verity deployment edit           # open the catalog in $EDITOR
+verity deployment path           # where the catalog lives
 ```
 
-…and writes `.verity/deploy-access.md` with how to reach this app's host. The **Release/Deploy Operator** (`/verity:ship`) consumes that target when it builds the deploy step.
+When the Architect picks a target it sets up the per-app access file — `verity deployment init-access` gitignores the real file and commits the "ask the admin" pointer — then writes `.verity/deploy-access.md` with how to reach this app's host. From there, `/verity:ship` deploys to that target. (`verity deployment access` tells a teammate whether they have the file, and who to ask if not.)
 
-## Guides (interactive, beginner-friendly)
+## Guides
 
-Self-contained HTML — clone/download the repo and open them in any browser (no server or internet needed):
+Interactive, beginner-friendly, and fully self-contained — clone or download the repo and open them in any browser (no server or internet needed):
 
-- [`docs/verity-overview.html`](docs/verity-overview.html) — **Overview**: what Verity is, the mental model, how it works (no jargon assumed)
-- [`docs/verity-usage.html`](docs/verity-usage.html) — **Usage**: install + command-by-command recipes + pro tips (Claude Code / OpenCode toggle)
-- [`docs/verity-flows.html`](docs/verity-flows.html) — **Flows**: start-from-scratch vs add-to-an-existing-project, side by side
-- [`docs/verity-flows.drawio`](docs/verity-flows.drawio) — the flow diagram as an editable draw.io / diagrams.net file
-- [`docs/commands.md`](docs/commands.md) — **Command reference**: all 13 `/verity:*` role commands and what each one does
-- [`docs/explainer-kit.md`](docs/explainer-kit.md) — **Explainer kit**: a briefing for an AI to describe Verity to humans (podcast/deck/talk) — story, diagrams, soundbites, fact sheet
+- [**Overview**](docs/verity-overview.html) — what Verity is and the mental model, no jargon assumed
+- [**Usage**](docs/verity-usage.html) — install + command-by-command recipes + pro tips (Claude Code / OpenCode toggle)
+- [**Flows**](docs/verity-flows.html) — start-from-scratch vs. add-to-an-existing-project, side by side ([editable `.drawio`](docs/verity-flows.drawio))
+- [**Command reference**](docs/commands.md) — all 13 `/verity:*` roles and what each one does
+- [**Explainer kit**](docs/explainer-kit.md) — a briefing for an AI to describe Verity to humans (podcast / deck / talk)
 
-## Subsystems
-- **Relay** — role orchestration + the stream loop + dependency engine
-- **Shipyard** — CI/CD spine + Release/Deploy Operator + deployment-methods catalog + runtime truth (`STATUS.md`)
-- **Ledger** — GitHub-derived state engine (no stale files)
-- **Gate** — review + security + the quality gates
-- **Verify** — live "observably-works" verification
+## Reference
 
-## Design docs
-- [`docs/framework-spec.md`](docs/framework-spec.md) — the build-ready architecture spec
-- [`docs/roles-spec.md`](docs/roles-spec.md) — working log + full rationale (all roles)
-- [`docs/interview-findings.md`](docs/interview-findings.md) — forensic interview of the real build that drove the design
-- [`docs/brand.md`](docs/brand.md) — naming / positioning
-- [`docs/walking-skeleton-plan.md`](docs/walking-skeleton-plan.md) — the first implementation slice
-
-## Package
-`verity-framework` (npm) · CLI binary: `verity` · Node ≥16 · host deps: `git`, `gh`
-
-## Contributing
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) — local setup, the test/lint checks, project layout, and conventions.
-
-## License
-MIT
+- **Package:** `verity-framework` · CLI binary `verity` · Node ≥16 · host deps `git`, `gh`
+- **Design docs:** [framework spec](docs/framework-spec.md) · [roles spec](docs/roles-spec.md) · [the interview that drove the design](docs/interview-findings.md) · [brand / positioning](docs/brand.md) · [walking-skeleton plan](docs/walking-skeleton-plan.md)
+- **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md) — local setup, the test/lint checks, project layout, and conventions
+- **License:** MIT
