@@ -707,7 +707,6 @@ Use these exact facts; do not invent beyond them.
 *Sources in this repo for deeper detail: [`README.md`](../README.md) ·
 [`commands.md`](commands.md) · [`framework-spec.md`](framework-spec.md) (build-ready
 architecture) · [`roles-spec.md`](roles-spec.md) (full role rationale) ·
-[`brand.md`](brand.md) (positioning) · [`interview-findings.md`](interview-findings.md)
-(the forensic origin story) · the interactive guides
+[`brand.md`](brand.md) (positioning) · the interactive guides
 [`verity-overview.html`](verity-overview.html) / [`verity-usage.html`](verity-usage.html)
 / [`verity-flows.html`](verity-flows.html).*

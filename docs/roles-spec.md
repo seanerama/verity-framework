@@ -354,7 +354,7 @@ Forensic interview of the real build (Switchboard) added these to the design. De
 2. **Recovery readiness** — rollback drills + **restore drills** (PITR), so "roll back prod" is never scary (the F4 discipline, made a standing practice).
 3. **Backup contract for ALL persistent state (new, N6 gap)** — every persistent volume is either backed up or **explicitly marked ephemeral/acceptable-loss**. The real build backed up Postgres but silently NOT the FAQ volume / retained artifacts — SRE closes that by making coverage an explicit, audited list.
 4. **Intermittent-environment operations (new, N6)** — model "env is off most nights" as a **NORMAL state**: start/stop procedures + an **"asleep vs incident" disambiguation runbook** (so a nightly outage isn't misread as an incident — F3/G3). The Operator's env-available precheck *consumes* this.
-5. **Secret lifecycle / rotation (new, N6)** — track + enforce rotation; flag stale/leaked credentials (the never-rotated classic PAT, the throwaway `admin/adminpw`). Feeds the pre-go-live gate.
+5. **Secret lifecycle / rotation (new, N6)** — track + enforce rotation; flag stale/leaked credentials (the never-rotated classic PAT, throwaway admin credentials). Feeds the pre-go-live gate.
 6. **Incident response** — triage → mitigate (often: invoke Operator rollback) → file issue → post-incident note; maintains `recovery-plan.md`.
 7. **Feeds operational truth into `STATUS.md`** — the "known live caveats" (Operator owns the file; SRE supplies the ops reality).
 
@@ -422,11 +422,11 @@ Forensic interview of the real build (Switchboard) added these to the design. De
 
 ## Gate — Pre-go-live / first-real-data (NEW; not a role)
 
-**Why:** the real build accumulated a "fine until real data" list that never got forced closed (throwaway `admin/adminpw`, never-rotated PAT, cross-user visibility, un-backed-up volumes — N6). A **blocking gate** before the project accepts real/production data or users.
+**Why:** the real build accumulated a "fine until real data" list that never got forced closed (throwaway admin credentials, never-rotated PAT, cross-user visibility, un-backed-up volumes — N6). A **blocking gate** before the project accepts real/production data or users.
 
 **Checklist (jointly owned: Security Auditor + SRE):**
 - Secret **rotation** (rotate any dev/exposed creds).
-- **Remove throwaway accounts** (the `admin/adminpw` class).
+- **Remove throwaway accounts** (the throwaway-credential class).
 - **Cross-user data isolation** verified (no cross-user leakage).
 - **Backup coverage for ALL persistent state** (SRE's contract — no silent gaps).
 - **Security deep-audit sign-off** (Security Auditor).

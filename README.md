@@ -88,6 +88,6 @@ Interactive, beginner-friendly, and fully self-contained — clone or download t
 ## Reference
 
 - **Package:** `verity-framework` · CLI binary `verity` · Node ≥16 · host deps `git`, `gh`
-- **Design docs:** [framework spec](docs/framework-spec.md) · [roles spec](docs/roles-spec.md) · [the interview that drove the design](docs/interview-findings.md) · [brand / positioning](docs/brand.md) · [walking-skeleton plan](docs/walking-skeleton-plan.md)
+- **Design docs:** [framework spec](docs/framework-spec.md) · [roles spec](docs/roles-spec.md) · [brand / positioning](docs/brand.md) · [walking-skeleton plan](docs/walking-skeleton-plan.md)
 - **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md) — local setup, the test/lint checks, project layout, and conventions
 - **License:** MIT
