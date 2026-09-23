@@ -66,7 +66,43 @@ Projection report (JSON, written even on failure):
   `source_commit`, `classification_digest`, and `staging_digest` from this
   report.
 
+### Additive v1.x fields (ADR-0035)
+
+OPTIONAL `verify` object (consumers must tolerate its absence). It is written
+ONLY by `verity promotion verify`, which merges it into the report it read;
+it never alters any `project`-owned field above.
+
+```json
+{
+  "verify": {
+    "gates": {
+      "install": null,
+      "lint": null,
+      "test": null,
+      "pack": null
+    },
+    "pack_shasum": "<sha1 | null>",
+    "baseline": null,
+    "verdict": "passed | failed"
+  }
+}
+```
+
+- `verify.gates.install` / `.lint` / `.test` / `.pack` — each
+  `null | { ok, command, summary }`; `install` may additionally carry
+  `downgraded` and `reason`.
+- `verify.pack_shasum` — the sha1 of the `npm pack` tarball, or `null`.
+- `verify.baseline` — `null`, `{ version, skipped, reason }`, or
+  `{ version, published_shasum, local_shasum, match }`.
+- `verify.verdict` — `passed | failed`.
+- `verity promotion propose` requires `verify.verdict: "passed"` and a
+  non-empty `verify.pack_shasum`, and copies `verify.pack_shasum` verbatim into
+  the PROM record's `package_shasum` (`promotion-records` contract).
+
 ## Versioning
 
 Frozen at **v1**. Changes are **additive only** — a breaking change is a NEW
 contract, not an edit (framework-spec §4.3). Every consumer depends on this shape.
+
+Amended additively 2026-09-23 per ADR-0035: documented the optional `verify`
+object written by `verity promotion verify` and what `propose` requires of it.

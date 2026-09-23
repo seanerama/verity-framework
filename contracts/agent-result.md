@@ -31,6 +31,13 @@ object. Exit-code mapping is part of the contract: `success` → 0, `gated` → 
   provider structured-output file validated against
   `schemas/agent-result.schema.json`. Both normalize into this contract;
   neither consumer-visible shape changes.
+- Outcome vocabulary per layer (documented additively, ADR-0035): the Claude
+  text marker's `outcome` is `success|gated|failed` (`result-contract.cjs`
+  `OUTCOMES`); the provider structured-output file's `outcome` is
+  `completed|gated|failed|no-op` plus a REQUIRED `summary: string` (the schema
+  and the structured marker). At normalization `completed` and `no-op` map to
+  wire `success`, and `summary` is dropped — it is never carried onto the wire.
+  The wire vocabulary below is always `success|gated|failed|infra_error`.
 
 ## Schema / wire
 
@@ -61,6 +68,10 @@ Semantics that are part of the freeze:
 - `artifacts` is a plain object of GitHub objects created/updated (best
   effort); `error` is `string | null` and non-null iff `outcome` is `failed`
   or `infra_error`.
+- `artifacts` may additionally carry (additive v1.x, ADR-0035):
+  `artifacts.paths: string[]` — relative repo paths reported by the provider's
+  structured output, folded in at normalization — and `artifacts.pr: number`,
+  set by the `git_lifecycle` step (the PR Verity opened for the run).
 - Infra failures also print one machine-parsable stderr line:
   `verity-agent-exec: 30 <slug>: <message>`.
 
@@ -83,6 +94,46 @@ their presence, without behavior change when absent):
 }
 ```
 
+Further additive v1.x fields (OPTIONAL, same tolerance rule; documented per
+ADR-0035 — each is already emitted by `agent-exec.cjs`):
+
+```json
+{
+  "containment_tier": "<string>",
+  "enforcement_gaps_acknowledged": [],
+  "containment_rejected": [],
+  "containment_merged": ["<relative path>"],
+  "enforcement_violations": [],
+  "enforcement_reverted": [],
+  "git_lifecycle": {},
+  "work_items": {},
+  "intent_artifacts": {
+    "outcome": "committed | noop | skipped | failed",
+    "sha": "<optional>",
+    "files": [],
+    "branch": "<optional>",
+    "pushed": false,
+    "reason": "<optional>",
+    "error": "<optional>"
+  }
+}
+```
+
+- `containment_tier` — string, which ADR-0011 containment guarantee applied
+  (providers with tiers only). `enforcement_gaps_acknowledged` — array.
+- `containment_rejected` — array; `containment_merged` — `string[]` (the
+  paths deterministic Verity code propagated).
+- `enforcement_violations` — array; `enforcement_reverted` — array.
+- `enforcement_violations`, `enforcement_reverted` and `containment_rejected`
+  appear only when `outcome` is `failed` or `infra_error` (a containment
+  breach outranks the role's own claim of success).
+- `git_lifecycle` — object, the Verity-performed git lifecycle result
+  (ADR-0012); a PR it opened is also surfaced as `artifacts.pr`.
+- `work_items` — object; plan role only, flag-gated (ADR-0026).
+- `intent_artifacts` — object (ADR-0033): `outcome` ∈
+  `committed | noop | skipped | failed`; `sha`, `files`, `branch`, `pushed`,
+  `reason`, `error` are optional.
+
 Fail-closed normalization rules (binding on every driver): invalid JSON,
 schema-invalid structured output, a missing result file, or a completed
 process with no valid result all normalize to `infra_error` — never to
@@ -93,3 +144,8 @@ with `timed_out: true`, never `success`.
 
 Frozen at **v1**. Changes are **additive only** — a breaking change is a NEW
 contract, not an edit (framework-spec §4.3). Every consumer depends on this shape.
+
+Amended additively 2026-09-23 per ADR-0035: documented the already-emitted
+optional v1.x fields, the per-layer outcome vocabulary (structured marker
+`completed|no-op` → wire `success`; `summary` not carried), and
+`artifacts.paths` / `artifacts.pr`.

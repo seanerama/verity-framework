@@ -241,6 +241,13 @@ function appendUsage(cwd, entry) {
 const COMMIT_AUTHOR_NAME = 'verity-worker';
 const COMMIT_AUTHOR_EMAIL = 'verity-worker@users.noreply.github.com';
 
+// The scoped-identity argv prefix every ENGINE-owned commit uses — the ledger
+// commit below and, since stage 96 (ADR-0033), the intent-artifacts commit
+// (agents/intent-artifacts.cjs). One definition, so the two can never drift.
+function botIdentityGitArgs() {
+  return ['-c', `user.name=${COMMIT_AUTHOR_NAME}`, '-c', `user.email=${COMMIT_AUTHOR_EMAIL}`];
+}
+
 // `git add` + `git commit` of ONLY the csv path, message
 // `chore(verity): usage <run-id>`, authored by the bot identity above so it
 // succeeds regardless of the ambient git config. Never throws: returns
@@ -252,19 +259,7 @@ function commitUsage(cwd, runId) {
     execFileSync('git', ['-C', cwd, 'add', '--', CSV_REL_PATH], { stdio: 'pipe' });
     execFileSync(
       'git',
-      [
-        '-C',
-        cwd,
-        '-c',
-        `user.name=${COMMIT_AUTHOR_NAME}`,
-        '-c',
-        `user.email=${COMMIT_AUTHOR_EMAIL}`,
-        'commit',
-        '-m',
-        message,
-        '--',
-        CSV_REL_PATH,
-      ],
+      ['-C', cwd, ...botIdentityGitArgs(), 'commit', '-m', message, '--', CSV_REL_PATH],
       { stdio: 'pipe' },
     );
     return { committed: true, message };
@@ -647,6 +642,8 @@ function dispatch(args, flags) {
 
 module.exports = {
   COLUMNS,
+  COMMIT_AUTHOR_EMAIL,
+  COMMIT_AUTHOR_NAME,
   CSV_REL_PATH,
   HEADER,
   LEGACY_COLUMNS,
@@ -657,6 +654,7 @@ module.exports = {
   STAGE21_HEADER,
   UNKNOWN_COST_GATE,
   appendUsage,
+  botIdentityGitArgs,
   checkDailyLimits,
   commitUsage,
   dispatch,

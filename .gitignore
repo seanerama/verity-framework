@@ -7,3 +7,9 @@ dist/
 !.env.*.example
 # Verity's own derived state cache (never authoritative — see framework-spec §5)
 .verity-cache/
+# Benchmark-harness fixture-run output — generated per run, never tracked (stage 98)
+benchmark/results/
+# Windows download sidecars (NTFS alternate data streams surfaced under WSL)
+*:Zone.Identifier
+# Hand-made backup copies
+*.bak

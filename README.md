@@ -70,6 +70,13 @@ Verity runs on three hosts. Install flag, interactive syntax, and where headless
 | **Codex CLI** | `verity install --codex` | `$verity-vision` | Supported (tier-1 containment) | Supervised: supported · unattended: opt-in tier-2, default off | **Deferred — local only (ADR-0009)** |
 | **OpenCode** | `verity install --opencode` | `/verity-vision` | Interactive only | Interactive only | Interactive only |
 
+A runtime passes **two separate gates**: being in the driver registry makes it
+*usable* by an explicit `verity agent-exec --agent <id>`, while a separate,
+engine-owned **provider trust table** is what makes it *trusted* — cleared for
+the unattended worker, for `mode: autonomous`, and for merge authority. A
+runtime that is registered but not in the trust table is refused for autonomy
+(fail closed), and `verity doctor` says so.
+
 Full Codex walkthrough, autonomy config, and troubleshooting: **[QUICKSTART.md → Codex CLI](QUICKSTART.md#codex-cli)**.
 
 **Codex CLI users:** `verity install --codex` installs the roles as user-scoped
@@ -130,7 +137,7 @@ Start with the quickstart, then go deeper as you need to:
 
 - [**Quickstart**](QUICKSTART.md) — from a fresh machine to a moving project, step by step, no jargon assumed
 - [**What's different**](docs/whats-different.md) — the mental model: what the optional autonomy layer adds on top of the classic hand-driven framework
-- [**Command reference**](docs/commands.md) — all 15 `/verity:*` roles and what each one does
+- [**Command reference**](docs/commands.md) — all 16 `/verity:*` roles and what each one does
 - [**Autonomy**](docs/autonomy.md) — the headless `verity-worker`: kill switch, modes, trust ladder, labels, approvals, cron + Actions + bot setup, cost tracking
 - [**Autonomy setup**](commands/verity/autonomy-setup.md) — `/verity:autonomy-setup`, the interview that generates your worker deployment
 

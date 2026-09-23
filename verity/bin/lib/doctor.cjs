@@ -52,6 +52,13 @@ const PKG = require('./engine-meta.cjs').load();
 // leaf on purpose: the codex driver requires doctor (for checkBinary), so
 // doctor must never require the driver back.
 const codexFeatures = require('./agents/codex-features.cjs');
+// Stage 94 (ADR-0031): the engine-owned provider TRUST table. SUPPORTED_AGENTS
+// below is READ FROM IT so the three provider lists that could drift (the
+// registry, the autonomy enum + JSON schema, and this one) cannot. Safe as a
+// top-level require: tiers.cjs pulls in only the result-contract error class,
+// so the driver→doctor import direction (claude.cjs/codex.cjs require THIS
+// module) stays acyclic.
+const tiers = require('./agents/tiers.cjs');
 
 // --- shared version probe (used by agent-exec.cjs) ----------------------------
 
@@ -542,6 +549,30 @@ function remoteGateRunnerChecks(opts = {}) {
   return rows;
 }
 
+// Stage 94 (ADR-0031): honesty rows for the state a freshly contributed host
+// SHOULD sit in — present in the driver registry (so `verity agent-exec --agent
+// <id>` works and a human can try it) but absent from the trust table (so the
+// unattended worker refuses it). That state is deliberate, not broken, so the
+// row is `ok: true`; what it must never be is INVISIBLE — an operator has to be
+// able to see why the worker will not pick a driver that is plainly installed.
+// With today's registry (claude, codex) both providers are tiered, so this
+// returns ZERO rows and every doctor invocation is byte-identical.
+function providerTrustChecks(opts = {}) {
+  // Lazy require: doctor is a LEAF module for the drivers (claude.cjs and
+  // codex.cjs both require it), so pulling the registry — which requires those
+  // drivers — in at module load would close the cycle. At call time it is safe.
+  const listed = opts.providers || (() => require('./agents/index.cjs').listProviders())();
+  return listed
+    .filter((id) => tiers.getTier(id) === null)
+    .map((id) => ({
+      name: `provider-trust:${id}`,
+      present: true,
+      version: null,
+      ok: true,
+      detail: `'${id}' is in the driver registry but has NO provider trust-table entry (ADR-0031): usable interactively via \`verity agent-exec --agent ${id}\`, REFUSED for the unattended worker and for mode: autonomous. Granting it trust is a separate, ADR-gated entry in verity/bin/lib/agents/tiers.cjs`,
+    }));
+}
+
 function runChecks(opts = {}) {
   // Stage 87 (ADR-0030): the resolved gate_runner travels beside the resolved
   // substrate — 'localhost' appends its Docker+act probe rows and (stage 88)
@@ -550,16 +581,20 @@ function runChecks(opts = {}) {
   // stay byte-identical).
   const remote = typeof opts.gateRunner === 'string' && opts.gateRunner.startsWith('remote:');
   const gateRows = opts.gateRunner === 'localhost' || remote ? gateRunnerChecks(opts) : [];
+  // Stage 94 (ADR-0031): zero rows while registry and table agree — appended
+  // like every other conditional row block, so today's output is unchanged.
+  const trustRows = providerTrustChecks(opts);
   if (opts.agent === 'codex') {
     const deps = opts.deps || CODEX_DEPENDENCIES;
     return [
       ...deps.map((dep) => checkOrSkip(dep, opts)),
       ...codexEnvironmentChecks(opts),
       ...gateRows,
+      ...trustRows,
     ];
   }
   const deps = opts.deps || DEPENDENCIES;
-  return [...deps.map((dep) => checkOrSkip(dep, opts)), ...gateRows];
+  return [...deps.map((dep) => checkOrSkip(dep, opts)), ...gateRows, ...trustRows];
 }
 
 // 0 = every check ok, 1 = at least one failing check (the `--quiet` contract).
@@ -569,7 +604,11 @@ function exitCodeFor(checks) {
 
 // --- runtime selection (stage 9, codex-support.md §10.2) ------------------------
 
-const SUPPORTED_AGENTS = ['claude', 'codex'];
+// Stage 94 (ADR-0031): READ FROM THE TRUST TABLE, never re-declared. This was
+// the third hand-maintained provider list (registry, autonomy enum + JSON
+// schema, here), and a list that must be updated in three places is a list that
+// drifts. `workerSelectableProviders()` is the one source.
+const SUPPORTED_AGENTS = tiers.workerSelectableProviders();
 
 // Which runtime doctor checks, and WHY — precedence: explicit --agent flag →
 // `.verity/autonomy.yml` agent.provider (only when the FILE names one; the
@@ -680,6 +719,7 @@ module.exports = {
   firstLine,
   gateRunnerChecks,
   parseVersion,
+  providerTrustChecks,
   resolveAgent,
   runChecks,
 };

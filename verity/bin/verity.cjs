@@ -202,7 +202,8 @@ const COMMANDS = {
   // the promotion PR in prod plus both provenance records; `promotion
   // finalize <version>` verifies the MERGED promotion tree against the PROM
   // record, then mints the authoritative tag + GitHub Release in prod and
-  // completes the record (npm publish NOT executed — O4). Verdicts map onto
+  // completes the record (it runs no publish itself — the tag push it makes is
+  // what triggers the prod publish workflow). Verdicts map onto
   // exit codes 0 / 20 contract violation / 30 infra (set in main()).
   promotion(rest, flags) {
     return promotion.dispatch(rest, flags);

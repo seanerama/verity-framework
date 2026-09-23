@@ -8,7 +8,7 @@ npm i -g verity-framework
 verity install --claude                  # or: --opencode
 ```
 
-There are **15 role commands**. The command name is short; the *role* it runs is
+There are **16 role commands**. The command name is short; the *role* it runs is
 named in the table — `/verity:ship` runs the Release/Deploy Operator,
 `/verity:verify` runs the Handoff Tester, `/verity:build` runs the Stage Manager,
 and so on. Start any new project with [`/verity:vision`](#design).
@@ -22,10 +22,18 @@ and so on. Start any new project with [`/verity:vision`](#design).
 
 Lock what you're building before any code is written.
 
+> **Existing project?** Start with [`/verity:revisit`](#any-time) instead. It
+> reads the codebase, derives identity *candidates* and contract candidates, lists
+> the missing spine, and proposes a hardening-first backlog — without locking,
+> freezing, or scaffolding anything. Then run `/verity:vision` to lock the
+> identity from those candidates, `/verity:architect` to freeze the contracts,
+> and feed the proposals to `/verity:plan` (proposal 1, "first green on legacy
+> code", first). See ADR-0032.
+
 | Command | Role | What it does |
 | --- | --- | --- |
 | `/verity:vision` | Vision | Clarify the idea, lock the project identity, and scaffold the repo with an honest hygiene CI. **Start here.** |
-| `/verity:architect` | Architect | Turn the locked identity + vision into a technical design — stack & topology, frozen interface contracts, ADRs, the deployment target (from your `verity deployment` catalog) — and own the walking skeleton. |
+| `/verity:architect` | Architect | Turn the locked identity + vision into a technical design — stack & topology, frozen interface contracts, ADRs, the deployment target (from your `verity deployment` catalog) — and define (never build) the walking skeleton. |
 | `/verity:deploy-setup` | Deployment Methods | Interview you about where you deploy apps (AWS / GCP / Azure / LAN / PaaS / SSH / k8s…) and build your **global** `~/.verity/deployment-methods.md` catalog — locations, never secrets. A setup helper run once (or when your targets change); the Architect reads what it writes. |
 
 ## Plan & Build
@@ -66,6 +74,7 @@ Take accrued merges all the way to production — and keep it healthy.
 | Command | Role | What it does |
 | --- | --- | --- |
 | `/verity:map` | Codebase Mapper | Generate an on-demand, structural code map (distinct from the Planner's schedule) — generated, never hand-maintained. |
+| `/verity:revisit` | Revisit | Come back to any project after time away: report where it stands, re-audit prior decisions against today's models, and propose a refreshed backlog. Read-only — its only write is a dated report under `docs/revisit/`; proposals are handed to `/verity:plan`. Works on projects that were never on Verity too (adoption mode). |
 
 ## Promotion (dev→prod projection)
 
@@ -189,10 +198,19 @@ verity promotion finalize <version> [--json]
   `production.commit`, `production.tag`, and `timestamps.finalized_at` filled,
   committed to the dev branch (`chore(promotion)` message). The record is
   immutable afterwards.
-- **npm publish is NOT executed** (open decision O4: publish auth). Finalize
-  prints the exact manual publish instruction — clone the tag fresh, `npm
-  publish`, with the expected tarball shasum to verify against — and records
-  `published: pending-O4` in its envelope.
+- **Publish: finalize starts it, and says so.** Finalize runs no publish itself
+  and holds no credential — but the prod tag it pushes is what **triggers** the
+  prod publish workflow (`.github/workflows/publish.yml`, `on: push` of `v*`
+  tags), which waits on the `npm-publish` environment approval. The notice it
+  prints names that trigger, the approval URL, the expected tarball shasum to
+  check with `npm view <package>@<version> dist.shasum`, and — if the run does
+  not complete — the by-hand fallback of publishing from a fresh clone of the
+  tag. Finalize **never observes the outcome**: it makes no network call to npm.
+- **The `published` envelope field** is a two-value enum, and *neither value
+  asserts registry state*: `not-triggered` (the initial value, and the value on
+  every refusal — nothing was tagged, so nothing was started) and
+  `workflow-triggered` (the tag and the GitHub Release both succeeded, so the
+  publish workflow owns it from here).
 
 Exit codes: `0` finalized · `20` wrong status, unmerged PR, or verification
 mismatch · `30` infrastructure failure (network, clone, tag push, `gh`).
@@ -221,8 +239,9 @@ verity promotion propose <version> --staging <staging>
 # 6. In DEV: verify the merged tree, then tag + release in PROD, complete the record
 verity promotion finalize <version>
 
-# 7. Manually: publish to npm from a fresh clone of the prod tag, comparing
-#    the shasum finalize printed (pending O4 — not automated)
+# 7. In PROD: approve the `npm-publish` environment run the tag push started
+#    (Actions → publish.yml), then verify the registry against the shasum
+#    finalize printed: npm view <package>@<version> dist.shasum
 ```
 
 Steps 1–4 and 6 are deterministic CLI verbs; steps 5 and 7 are deliberate
@@ -253,6 +272,26 @@ the file absent the guard is inert and `release cut` behaves exactly as
 before — existing consumers are unaffected. A malformed `promotion.json` is a
 hard error (exit `20`), never a silently disarmed guard.
 
+**Where `previous` comes from (ADR-0034):** with the split active, `release
+prepare` and `release cut` (including `--dry-run`) take `previous` from the
+highest `status: released` record under `.verity/promotions/` and the commit
+range from that record's `development.commit` to `HEAD` — never from a dev
+tag, so no mirror tag is needed or read. No released record ⇒ all three refuse
+with `no-released-promotion` (exit `20`); a computed version that is already
+released ⇒ `version-already-released` (both modes — in a non-split repository
+the check is an existing local `v<version>` tag). `verity state` reports the
+same number: `release` is `v<version>` of that record (`null` when nothing was
+ever released) with `release_source: "promotion-record"`; a non-split
+repository keeps the highest local tag with `release_source: "tag"`,
+byte-identical to before. `verity release current` answers from the same
+truth: with the split active it reports the released record (`version`,
+`tag`, `source: "promotion-record"`, `promotion_id`) and refuses exactly as
+`prepare` would; otherwise the highest local tag with `source: "tag"`. A
+released record whose `development.commit` this clone does not have, or that
+is not an ancestor of `HEAD`, is refused (`dev-commit-unreachable` /
+`dev-commit-not-ancestor`, exit `20`) in every verb — never a silent empty
+range.
+
 ---
 
 ## A typical lifecycle
@@ -262,7 +301,7 @@ vision → architect → plan → build → review → test → security → doc
        → ship → verify → golive → sre
 ```
 
-`/verity:map` is available at any point. You don't have to run every role on every
+`/verity:map` and `/verity:revisit` are available at any point. You don't have to run every role on every
 project — Verity tracks dependencies, so `/verity:next` (and each role on completion)
 points you at what can run next. `/verity:deploy-setup` (where your apps ship) and
 `/verity:autonomy-setup` (how the worker runs) are one-time (or when-things-change)

@@ -33,13 +33,28 @@ const classification = require('./classification.cjs');
 const promotionConfig = require('./promotion-config.cjs');
 const ledger = require('./ledger.cjs');
 const gh = require('./gh.cjs');
+const status = require('./status.cjs');
 const { sanitize } = require('./changelog-sanitize.cjs');
 
 const CLASSIFICATION_PATH = '.verity/production-content-classification.yml';
+// Stage 91: the two release-surface artifacts finalize stamps alongside the
+// PROM record. Git paths (forward slashes) — they go straight to `git add`.
+const RUNTIME_JSON_PATH = '.verity/runtime.json';
+const STATUS_MD_PATH = 'STATUS.md';
 
 const EXIT_BUILT = 0;
 const EXIT_CONTRACT = 20;
 const EXIT_INFRA = 30;
+
+// Stage 93: the `published` field of the finalize envelope. It reports what
+// finalize CAUSED, never registry state — finalize makes no network call to
+// npm and never learns the publish run's outcome.
+//   not-triggered      nothing was tagged, so nothing was started (the initial
+//                      value, and the value on every refusal/failure path)
+//   workflow-triggered a v* tag now exists in prod and its push triggered the
+//                      prod publish workflow — NOT "published"
+const PUBLISH_NOT_TRIGGERED = 'not-triggered';
+const PUBLISH_WORKFLOW_TRIGGERED = 'workflow-triggered';
 
 // High-precision credential shapes only. The GitHub shapes are ported from the
 // repo's hygiene tooling (ledger.cjs TOKEN_SHAPES); the rest are the standard
@@ -1231,15 +1246,22 @@ function propose(version, opts = {}) {
 //   4. Complete the PROM record: status `released`, production.commit/tag,
 //      timestamps.finalized_at — committed to dev with a chore(promotion)
 //      message.
-//   5. npm publish is NOT executed (O4 publish auth unresolved): finalize
-//      prints the exact manual publish instruction with the expected shasum
-//      and records `published: pending-O4` in its envelope.
+//   5. finalize still runs NO publish and holds no credential — but the tag
+//      push it just made IS the trigger for the prod publish workflow, so it
+//      prints a notice naming that trigger, the `npm-publish` environment
+//      approval the operator still owes, and the expected shasum to verify
+//      against. `published` reports what finalize CAUSED, never registry
+//      state: `not-triggered` (initial, and on every refusal — nothing was
+//      tagged) → `workflow-triggered` (tag + release both succeeded).
 // Exit codes: 0 finalized / 20 wrong status, unmerged PR, verification
 // mismatch / 30 infra (network, clone, push, gh).
 
 // Minimal reader for the exact two-level YAML shape buildPromRecord writes
 // (promotion-records v1). Not a general YAML parser — fail closed on any
-// line it does not recognize rather than guess.
+// line it does not recognize rather than guess. Full-line `#` comments carry
+// no data and are skipped (stage 97: the real PROM-0001 gained two of them
+// with its additive `publish:` block, and a comment must not make a released
+// record unreadable as release truth).
 function parsePromRecord(text, file) {
   const out = {};
   let section = null;
@@ -1250,7 +1272,7 @@ function parsePromRecord(text, file) {
     return /^\d+$/.test(v) ? Number.parseInt(v, 10) : v;
   };
   for (const line of String(text).split('\n')) {
-    if (line.trim() === '') {
+    if (line.trim() === '' || /^\s*#/.test(line)) {
       continue;
     }
     const child = /^ {2}([a-z_]+): (.*)$/.exec(line);
@@ -1294,6 +1316,62 @@ function findPromRecord(cwd, version) {
     `no PROM record for version ${version} in ${PROMOTIONS_DIR}/ — run \`verity promotion propose\` first`,
     EXIT_CONTRACT,
   );
+}
+
+// --- stage 97 (ADR-0034): the released-record ledger as dev-side release truth
+//
+// Once the split is active, dev tags are not release truth (ADR-0019 made
+// authoritative vX.Y.Z tags prod-only); the PROM records are: each `released`
+// record carries the version, the prod tag, and `development.commit` — the
+// exact dev commit the release was projected from. `release.derive()` and
+// `ledger.project()` read them here. READ-ONLY: records are written by
+// propose/finalize alone. A malformed record throws (parsePromRecord names
+// the file), never silently drops out of the ledger — the same fail-loud
+// stance finalize takes on its own record.
+function releasedRecords(cwd) {
+  const dir = path.join(cwd, PROMOTIONS_DIR);
+  const files = fs.existsSync(dir)
+    ? fs
+        .readdirSync(dir)
+        .filter((f) => /^PROM-\d{4}\.yml$/.test(f))
+        .sort()
+    : [];
+  const out = [];
+  for (const f of files) {
+    const record = parsePromRecord(fs.readFileSync(path.join(dir, f), 'utf8'), f);
+    if (record.status !== 'released') {
+      continue; // proposed / abandoned / promoted: not a release
+    }
+    const version = record.version === undefined ? undefined : String(record.version);
+    const devCommit = record.development?.commit;
+    if (!version || !SEMVER_RE.test(version) || !devCommit || devCommit === null) {
+      throw new PromotionError(
+        `released PROM record ${f} is unusable as release truth (version ${JSON.stringify(record.version)}, development.commit ${JSON.stringify(devCommit)}) — refusing to derive from it`,
+        EXIT_CONTRACT,
+      );
+    }
+    out.push({
+      promotionId: String(record.promotion_id),
+      version,
+      tag: record.production?.tag ?? null,
+      devCommit: String(devCommit),
+    });
+  }
+  return out;
+}
+
+// The newest release by SEMVER (highest `version` among `released` records —
+// not the highest PROM number: a superseding attempt is a new record, and a
+// re-release of an older line must never win). null when nothing was ever
+// released; callers decide what that means (release.derive refuses, ledger
+// reports null).
+function latestReleased(cwd) {
+  const released = releasedRecords(cwd);
+  if (released.length === 0) {
+    return null;
+  }
+  const top = ledger.latestTag(released.map((r) => r.version));
+  return released.find((r) => r.version === top) || null;
 }
 
 // Complete the record by exact-line rewriting (the file is immutable after
@@ -1348,24 +1426,114 @@ function buildReleaseBody(manifestText, manifest, dev) {
   return body;
 }
 
-// The manual publish instruction (O4 open: finalize NEVER runs npm publish).
-// Carries the expected shasum so the operator can verify their own pack —
-// and nothing else: no tokens, no dev identifiers, no secret locations.
-function buildPublishInstruction(prodRepo, tag, expectedShasum) {
+// The publish notice: what finalize CAUSED, never what it cannot observe.
+// Pushing the prod `v<version>` tag is itself the publish trigger — prod
+// carries a tag-triggered publish workflow behind a required-reviewer
+// environment — so the honest report is "started, waiting on your approval",
+// not "blocked, publish it yourself".
+//
+// Three rules keep this true in every state the operator can be in (workflow
+// healthy / workflow failing because the registry side is not set up yet /
+// a different publish credential arrangement behind the same gate):
+//   - name the TRIGGER, the GATE and the VERIFICATION, never the credential
+//     mechanism — that lives in the prod repo and is the operator's to change;
+//   - claim nothing about registry state (finalize makes no network call and
+//     never learns the run's outcome);
+//   - keep the by-hand path as an explicit FALLBACK — the tag is authoritative
+//     whether or not the workflow run completes.
+// Carries the expected shasum so the operator can verify what landed — and no
+// dev identifiers and nothing secret-shaped (test-asserted).
+function buildPublishNotice(cwd, dev, prodRepo, tag, version, expectedShasum) {
+  // The package name is the one dev-derived value in this text, and a SCOPED
+  // name (`@owner/repo`) can contain the dev slug verbatim. Drop it to the
+  // placeholder rather than leak it — the version alone still names what to
+  // verify, and a sanitization worry must never cost an already-durable
+  // release its notice.
+  const name = devPackageName(cwd);
+  const pkg = name && [dev.slug, dev.url].some((n) => n && name.includes(n)) ? null : name;
+  const spec = `${pkg || '<package>'}@${version}`;
+  // The fallback clone is a PROD clone — name its directory after the prod
+  // repo, so nothing dev-derived appears in a command the operator pastes.
+  const dir = `${(prodRepo.split('/').pop() || 'release').replace(/[^A-Za-z0-9._-]/g, '-')}-${tag}`;
   return [
-    'npm publish NOT executed (open decision O4: publish auth is unresolved — published: pending-O4).',
-    'To publish manually from the authoritative tag:',
-    `  git clone https://github.com/${prodRepo}.git verity-${tag} && cd verity-${tag}`,
+    `Prod tag ${tag} is pushed — that push triggered the prod publish workflow`,
+    `(\`.github/workflows/publish.yml\` in ${prodRepo}, \`on: push\` of \`v*\` tags).`,
+    'Finalize runs no publish itself and does not observe the run.',
+    '',
+    'Your step: approve the `npm-publish` environment run at',
+    `  https://github.com/${prodRepo}/actions/workflows/publish.yml`,
+    '(the publish clone runs `prepublishOnly` — lint + test — on every path).',
+    '',
+    'Then verify what landed:',
+    `  npm view ${spec} dist.shasum`,
+    `  must equal: ${expectedShasum}`,
+    '',
+    `Fallback — if that run does not complete, ${tag} is still the authoritative`,
+    'source and can be published by hand from a fresh clone of it:',
+    `  git clone https://github.com/${prodRepo}.git ${dir} && cd ${dir}`,
     `  git checkout ${tag}`,
     '  npm publish',
-    `Expected tarball shasum (verify with \`npm pack --json\`): ${expectedShasum}`,
   ].join('\n');
+}
+
+// --- stage 91: runtime truth (.verity/runtime.json + STATUS.md) --------------
+//
+// `promotion finalize` is the single moment at which "this version is the
+// released one" becomes true, and it already writes-and-commits one dev-side
+// artifact (the completed PROM record). Stamping the release surface in that
+// same step is what stops it drifting: the documented manual `/verity:ship`
+// step 7 refresh was skipped for BOTH the 1.2.0 and the 1.3.0 promotions — a
+// human step that fails two times out of two is a missing automation.
+//
+// Deliberately a STAMP, not a gate: nothing here can refuse a promotion, and a
+// failure warns rather than failing a release that is already durable (prod
+// tag, GitHub Release, completed PROM record).
+
+// The npm package name for the rollback_from string, read from the dev repo's
+// package.json rather than hardcoded, so the behavior is right in a consumer
+// project. Never throws — a missing/unparsable package.json drops the npm
+// clause instead of costing the stamp.
+function devPackageName(cwd) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf8'));
+    return typeof pkg.name === 'string' && pkg.name.length > 0 ? pkg.name : null;
+  } catch {
+    return null;
+  }
+}
+
+// The string shape already in runtime.json: "v1.0.1 (git tag; npm pkg@1.0.1)".
+function rollbackFromString(cwd, previousVersion) {
+  const pkg = devPackageName(cwd);
+  return pkg
+    ? `v${previousVersion} (git tag; npm ${pkg}@${previousVersion})`
+    : `v${previousVersion} (git tag)`;
+}
+
+// Stamp version / deployed_at / rollback_from and re-render STATUS.md.
+// `environments`, `secret_locations` and `notes` are untouched — this records
+// version truth only, it does not invent a deployment topology. Returns the git
+// paths to fold into the record commit; throws on failure (the caller catches).
+function stampRuntimeTruth(statusLib, cwd, version, deployedAt) {
+  const data = statusLib.read(cwd);
+  const previous = data.version;
+  data.version = version;
+  data.deployed_at = deployedAt;
+  if (previous) {
+    data.rollback_from = rollbackFromString(cwd, previous);
+  }
+  statusLib.write(cwd, data);
+  // STATUS.md is never hand-written — it stays a pure rendering of the JSON.
+  statusLib.render(cwd, data);
+  return [RUNTIME_JSON_PATH, STATUS_MD_PATH];
 }
 
 // finalize(version, opts) — opts: cwd (dev repo), prodUrl (clone/push URL
 // override — tests point it at a local bare fixture), gh (injectable gh
-// runner, house pattern), commitRecord (default true: commit the completed
-// PROM record to the current dev branch).
+// runner, house pattern), status (injectable runtime-truth seam, same pattern —
+// tests use it to prove the stamp fails soft), commitRecord (default true:
+// commit the completed PROM record — and the runtime stamp — to the current
+// dev branch).
 // Returns the result envelope in all outcome cases, like project()/verify()/
 // propose().
 function finalize(version, opts = {}) {
@@ -1383,9 +1551,18 @@ function finalize(version, opts = {}) {
     verification: null,
     record_path: null,
     record_committed: false,
-    published: 'pending-O4',
+    // stage 91 — additive: did the release surface get stamped with this
+    // version? Never gates the finalize; false means "run it by hand".
+    runtime_stamped: false,
+    runtime_version: null,
+    // Two-value enum, and neither value asserts registry state:
+    //   'not-triggered'      nothing was tagged, so nothing was started
+    //   'workflow-triggered' a v* tag now exists in prod; the prod publish
+    //                        workflow owns it from here
+    published: PUBLISH_NOT_TRIGGERED,
     publish_instruction: null,
   };
+  const statusLib = opts.status || status;
   const tmpDirs = [];
 
   const finish = (exitCode, rawSuffix, failures) => {
@@ -1397,7 +1574,7 @@ function finalize(version, opts = {}) {
     }
     const raw =
       exitCode === EXIT_BUILT
-        ? `finalized v${result.version}: tag ${result.tag} on ${String(result.merge_commit).slice(0, 12)} in ${result.prod_repo}, release created, ${result.promotion_id} → released (publish: pending-O4)`
+        ? `finalized v${result.version}: tag ${result.tag} on ${String(result.merge_commit).slice(0, 12)} in ${result.prod_repo}, release created, ${result.promotion_id} → released (publish: ${result.published})`
         : `finalize failed: ${rawSuffix}`;
     return { ...result, exit_code: exitCode, raw };
   };
@@ -1666,7 +1843,43 @@ function finalize(version, opts = {}) {
     const finalizedAt = new Date().toISOString();
     const completed = completePromRecord(found.text, { mergeCommit, tag, finalizedAt });
     fs.writeFileSync(result.record_path, completed);
+
+    // --- stamp runtime truth (stage 91 — FAIL SOFT) -------------------------
+    // Same `finalizedAt` as the record: one clock reading, so runtime.json's
+    // deployed_at and the record's finalized_at agree byte-for-byte. The tag,
+    // release and record are already durable here, so a stamp failure warns and
+    // names the manual command — it must NEVER flip a verified release to a
+    // failure exit code (contrast the record commit below, which DOES raise
+    // EXIT_INFRA: that one is the contract artifact, this is a convenience
+    // surface).
+    const stampFailed = (err) => {
+      result.runtime_stamped = false;
+      result.runtime_version = null;
+      process.stderr.write(
+        `verity: warning: ${result.promotion_id} is released but the release surface was NOT stamped (${err.message}) — run \`verity status set version ${result.version}\` by hand\n`,
+      );
+    };
+    let stampedPaths = [];
+    try {
+      stampedPaths = stampRuntimeTruth(statusLib, cwd, result.version, finalizedAt);
+      result.runtime_stamped = true;
+      result.runtime_version = result.version;
+    } catch (err) {
+      stampFailed(err);
+    }
+
     if (opts.commitRecord !== false) {
+      // Staged in its OWN try so the guarantee survives the commit too: if the
+      // runtime files cannot be staged (gitignored in a consumer project, say),
+      // drop them from the commit rather than let a convenience surface raise
+      // EXIT_INFRA on a version that is already released.
+      if (stampedPaths.length > 0) {
+        try {
+          git(cwd, ['add', ...stampedPaths]);
+        } catch (err) {
+          stampFailed(err);
+        }
+      }
       try {
         git(cwd, ['add', found.rel]);
         git(cwd, [
@@ -1684,10 +1897,17 @@ function finalize(version, opts = {}) {
       }
     }
 
-    // --- manual publish instruction (O4 open — NEVER executed here) ---------
-    result.publish_instruction = buildPublishInstruction(
+    // --- publish notice: the tag push above IS the trigger ------------------
+    // Set only here, past the tag push AND the release — every earlier exit
+    // leaves `published: not-triggered`, which is the literal truth on a
+    // refusal: nothing was tagged, so nothing was started.
+    result.published = PUBLISH_WORKFLOW_TRIGGERED;
+    result.publish_instruction = buildPublishNotice(
+      cwd,
+      dev,
       cfg.prod_repo,
       tag,
+      result.version,
       record.verification.package_shasum,
     );
     process.stderr.write(`${result.publish_instruction}\n`);
@@ -1758,6 +1978,8 @@ module.exports = {
   verify,
   propose,
   finalize,
+  releasedRecords,
+  latestReleased,
   compareTarballs,
   inspectPack,
   exitCodeFor,

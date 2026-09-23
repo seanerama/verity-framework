@@ -7,6 +7,12 @@
 // The guard's regression contract is NOT here: it is the existing release tests
 // (tests/shipyard.test.cjs) passing UNCHANGED — absent `.verity/promotion.json`
 // must leave `cut` byte-identical to before this stage.
+//
+// Stage 97 (ADR-0034): with the split armed, derivation reads the released
+// promotion record, so the guard fixtures below also carry one (PROM-0001
+// released 0.1.0 from the v0.1.0 commit — the same `previous` the tag gave, so
+// the numbers these tests pin are unchanged). Split armed WITHOUT a released
+// record now fails closed before the tag guard: tests/release-split-truth.test.cjs.
 const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -172,6 +178,21 @@ test('cut and prepare agree on version/tag for the same fixture and bump (shared
   assertEqual(prep.changelog, sanitize(dry.changelog), 'same section, sanitized vs raw');
 });
 
+test('cut and prepare share one derivation under split_active too (stage 97: record-derived previous)', () => {
+  const f = fixture();
+  armSplit(f);
+  releasedRecord(f);
+  const dry = release.cut(f.dir, { bump: 'minor', dryRun: true });
+  const prep = release.prepare(f.dir, { bump: 'minor' });
+  assertEqual(dry.previous, 'v0.1.0', 'previous from the released record');
+  assertEqual(dry.version, '0.2.0');
+  assertEqual(prep.version, dry.version);
+  assertEqual(prep.tag_candidate, dry.tag);
+  assertEqual(prep.previous, dry.previous);
+  assertEqual(prep.commitCount, dry.commitCount);
+  assertEqual(prep.changelog, sanitize(dry.changelog), 'same section, sanitized vs raw');
+});
+
 // --- the authoritative-tag guard in cut ---
 function armSplit(f) {
   fs.mkdirSync(path.join(f.dir, '.verity'), { recursive: true });
@@ -181,9 +202,43 @@ function armSplit(f) {
   );
 }
 
+// A released PROM record for 0.1.0 projected from the v0.1.0 commit (stage 97:
+// the split-active derivation source), in the promotion-records v1 shape.
+function releasedRecord(f) {
+  const devCommit = f.git(['rev-parse', 'v0.1.0^{commit}']).trim();
+  fs.mkdirSync(path.join(f.dir, '.verity', 'promotions'), { recursive: true });
+  fs.writeFileSync(
+    path.join(f.dir, '.verity', 'promotions', 'PROM-0001.yml'),
+    [
+      'promotion_id: PROM-0001',
+      'version: 0.1.0',
+      'status: released',
+      'development:',
+      '  repository: acme/widget-dev',
+      `  commit: ${devCommit}`,
+      '  staging_digest: sha256:aaaa',
+      '  classification_digest: sha256:bbbb',
+      'production:',
+      '  repository: acme/widget',
+      '  pull_request: 1',
+      `  commit: ${'f'.repeat(40)}`,
+      '  tag: v0.1.0',
+      'verification:',
+      '  gates: all-pass',
+      '  package_shasum: deadbeef',
+      '  baseline: null',
+      'timestamps:',
+      '  proposed_at: 2026-08-05T00:00:00.000Z',
+      '  finalized_at: 2026-08-05T00:10:00.000Z',
+      '',
+    ].join('\n'),
+  );
+}
+
 test('guard: split_active true makes cut refuse with exit 20, no tag created, message names release prepare', () => {
   const f = fixture();
   armSplit(f);
+  releasedRecord(f);
   const before = snapshot(f);
   const r = cli(['release', 'cut', '--no-push', '--cwd', f.dir]);
   assertEqual(r.status, 20, `expected exit 20, got ${r.status} (stderr: ${r.stderr})`);
@@ -203,6 +258,7 @@ test('guard: split_active true makes cut refuse with exit 20, no tag created, me
 test('guard: cut --dry-run still returns the computation under split_active true', () => {
   const f = fixture();
   armSplit(f);
+  releasedRecord(f);
   const r = cli(['release', 'cut', '--dry-run', '--cwd', f.dir]);
   assertEqual(r.status, 0, `stderr: ${r.stderr}`);
   const out = JSON.parse(r.stdout);
@@ -232,6 +288,7 @@ test('guard: absent config leaves cut fully operational (kill-switch default OFF
 test('guard: module-level cut throws with exitCode 20 under split_active true', () => {
   const f = fixture();
   armSplit(f);
+  releasedRecord(f);
   let err = null;
   try {
     release.cut(f.dir, { push: false });

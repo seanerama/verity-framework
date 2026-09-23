@@ -72,7 +72,35 @@ is terminal from proposed/promoted). `finalize` verifies the merged prod tree's
 RELEASE-MANIFEST matches the PROM record (version + digests) before tagging —
 a mismatch aborts, tagging nothing.
 
+Additive notes on `status` (ADR-0035): `promoted` and `abandoned` are
+reserved — not emitted in v1 (ADR-0035). The engine writes `proposed`
+(`propose`) → `released` (`finalize`) only, and `finalize` refuses a record
+whose `status` is not `proposed`. `finalize`'s command output
+`published: not-triggered | workflow-triggered` reflects what finalize
+*caused* (whether it triggered the publish workflow), not what the registry
+shows; it is command output, not a record field.
+
+### Additive v1.x fields (ADR-0035)
+
+OPTIONAL `publish:` section of the PROM record — evidence only, recorded by
+hand after the registry publish is observed; never engine-written, and NOT a
+`status` transition:
+
+```yaml
+publish:
+  registry: <string>              # e.g. registry.npmjs.org
+  package: <string>               # e.g. verity-framework@1.2.0
+  published_at: <iso8601>
+  registry_shasum: <sha1>
+  shasum_matches_record: <bool>   # registry_shasum == verification.package_shasum
+  method: <string>
+```
+
 ## Versioning
 
 Frozen at **v1**. Changes are **additive only** — a breaking change is a NEW
 contract, not an edit (framework-spec §4.3). Every consumer depends on this shape.
+
+Amended additively 2026-09-23 per ADR-0035: marked `promoted`/`abandoned`
+reserved (not emitted in v1), documented the optional evidence-only `publish:`
+section and the meaning of finalize's `published:` output.

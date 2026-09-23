@@ -2,6 +2,10 @@
 // version DERIVED from the latest tag (so the binary can't lie about its version) +
 // changelog auto-generated from Conventional Commits. Tags/commits are injectable
 // (opts.tags / opts.commits) so the logic is unit-testable without git.
+// Stage 97 (ADR-0034): once the dev/prod split is active the latest tag is NOT
+// the dev side's release truth (authoritative tags are prod-only, ADR-0019) —
+// the newest `released` promotion record is, and the commit range starts at
+// that record's development.commit. Non-split repositories are byte-identical.
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
@@ -23,6 +27,18 @@ function git(cwd, args) {
 
 function gitTags(cwd) {
   return git(cwd, ['tag']).split('\n').filter(Boolean);
+}
+
+// A git predicate that does NOT swallow: true iff the command exits 0. Used
+// for the checks whose failure must refuse (stage 97 review R2) — `git()`
+// above returns '' on failure, which is exactly the fail-open to avoid.
+function gitOk(cwd, args) {
+  try {
+    execFileSync('git', ['-C', cwd, ...args], { stdio: ['ignore', 'ignore', 'ignore'] });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function commitsSince(cwd, tag) {
@@ -100,15 +116,101 @@ function run(cmd, args) {
   execFileSync(cmd, args, { stdio: 'inherit' });
 }
 
+// A derivation refusal (stage 97, ADR-0034): the tag guard's exit code (20)
+// and wire shape (`{ error }` on stderr) with a machine-readable slug leading
+// the message. Thrown from derive() itself so `prepare`, `cut --dry-run`, and
+// `cut` all refuse — none of the three may compute a number the ledger
+// contradicts.
+class ReleaseRefusal extends Error {
+  constructor(slug, detail) {
+    super(`${slug}: ${detail}`);
+    this.slug = slug;
+    this.exitCode = 20;
+  }
+}
+
 // The one derivation both `cut` and `prepare` share (extracted in stage 42 so
-// the two verbs can never disagree): version from the latest tag, changelog
-// from the Conventional Commits since it. Pure computation, no side effects.
+// the two verbs can never disagree): version from the previous release,
+// changelog from the Conventional Commits since it. Pure computation, no side
+// effects. Where "previous" comes from is the split question (ADR-0034):
+//   - split_active false (or no promotion.json): the latest local tag, and
+//     the commits since it — exactly the pre-stage-97 path;
+//   - split_active true: the highest `released` promotion record (never a dev
+//     tag — the hand-made v1.2.0 mirror is inert residue) and the commits since
+//     its development.commit; no released record ⇒ refuse (fail closed, never
+//     a silent fall-back to tags, which was the defect).
+// Both modes then refuse a computed version that has already been released
+// (a `released` record naming it / an existing local v<version> tag).
+// The split-active release truth, validated (stage 97; review R2). Returns
+// null when the split is off. When on: the highest released record, or a
+// refusal — no released record (`no-released-promotion`); a
+// development.commit this clone does not have (`dev-commit-unreachable`:
+// `git log <sha>..HEAD` through the swallowing helper would silently yield
+// ZERO commits and an empty changelog); or one that is not an ancestor of
+// HEAD (`dev-commit-not-ancestor`: a rebased dev history would re-list
+// shipped work). Shared by derive() and current() so no verb can answer
+// from a truth another verb would refuse.
+function splitTruth(cwd) {
+  if (!promotionConfig.read(cwd).split_active) {
+    return null;
+  }
+  // Lazy: promotion.cjs is the heavy prod-side module; the non-split path
+  // never loads it.
+  const promotion = require('./promotion.cjs');
+  const last = promotion.latestReleased(cwd);
+  if (last === null) {
+    throw new ReleaseRefusal(
+      'no-released-promotion',
+      `${promotionConfig.PROMOTION_CONFIG_PATH} has split_active: true but no promotion record under .verity/promotions/ has status: released — with the split active the dev side derives its version and commit range from the last released promotion (ADR-0034), never from a dev tag. Run the promotion flow (\`verity promotion propose\` → prod merge → \`verity promotion finalize\`) so a released record exists; do not add a mirror tag.`,
+    );
+  }
+  if (!gitOk(cwd, ['cat-file', '-e', `${last.devCommit}^{commit}`])) {
+    throw new ReleaseRefusal(
+      'dev-commit-unreachable',
+      `${last.promotionId} (released ${last.version}) records development.commit ${last.devCommit}, which this clone does not have — refusing to derive a commit range from a commit it cannot see (fetch the full dev history, or inspect the record)`,
+    );
+  }
+  if (!gitOk(cwd, ['merge-base', '--is-ancestor', last.devCommit, 'HEAD'])) {
+    throw new ReleaseRefusal(
+      'dev-commit-not-ancestor',
+      `${last.promotionId} (released ${last.version}) records development.commit ${last.devCommit}, which is not an ancestor of HEAD — the range since the last release is undefined on this history (rebased or wrong branch); refusing rather than re-listing shipped work`,
+    );
+  }
+  return { promotion, last };
+}
+
 function derive(cwd, opts = {}) {
-  const tags = opts.tags || gitTags(cwd);
-  const previous = ledger.latestTag(tags);
+  const truth = splitTruth(cwd);
+  const split = truth !== null;
+  let previous;
+  let commits;
+  let alreadyReleased;
+  if (split) {
+    const { promotion, last } = truth;
+    previous = `v${last.version}`;
+    commits = opts.commits || commitsSince(cwd, last.devCommit);
+    const released = promotion.releasedRecords(cwd);
+    alreadyReleased = (v) => released.find((r) => r.version === v) || null;
+  } else {
+    const tags = opts.tags || gitTags(cwd);
+    previous = ledger.latestTag(tags);
+    commits = opts.commits || commitsSince(cwd, previous);
+    // The local tags are the non-split release truth, so the guard reads the
+    // repository's own tags even when the derivation ran on injected ones.
+    const local = new Set(opts.tags ? [...tags, ...gitTags(cwd)] : tags);
+    alreadyReleased = (v) => (local.has(`v${v}`) ? { tag: `v${v}` } : null);
+  }
   const version = nextVersion(previous, opts.bump || 'patch');
   const tag = `v${version}`;
-  const commits = opts.commits || commitsSince(cwd, previous);
+  const hit = alreadyReleased(version);
+  if (hit !== null) {
+    throw new ReleaseRefusal(
+      'version-already-released',
+      split
+        ? `computed ${tag} is already released (${hit.promotionId}, prod tag ${hit.tag}) — refusing to derive a version that has shipped; the released ledger and the derivation disagree, inspect .verity/promotions/`
+        : `computed ${tag} already exists as a local tag — refusing to derive a version that has shipped`,
+    );
+  }
   const changelog = changelogFrom(commits, version);
   return { version, tag, previous, changelog, commitCount: commits.length };
 }
@@ -130,7 +232,9 @@ function cut(cwd, opts = {}) {
   // habit-driven `release cut` in dev must refuse BEFORE any side effect.
   // Reading the config throws on a malformed file (exit 20, never silently
   // off); an absent file leaves cut byte-identical to today. --dry-run
-  // returned above: the computation is harmless and stays available.
+  // returned above: the computation is harmless and stays available (stage
+  // 97: derive() itself has already refused when the split is active with no
+  // released record — that refusal is NOT skipped by --dry-run).
   if (promotionConfig.read(cwd).split_active) {
     const err = new Error(
       `release cut refused: ${promotionConfig.PROMOTION_CONFIG_PATH} has split_active: true — authoritative ${tag} tags are minted in the production repo by the promotion flow, not in dev. Use \`verity release prepare\` to compute the version and sanitized changelog section here (\`release cut --dry-run\` also still computes without tagging).`,
@@ -188,9 +292,32 @@ function prepare(cwd, opts = {}) {
   return { ...result, applied: true };
 }
 
+// `release current` — the current release truth (stage 97 review R1: the
+// ship role runs this first, so it must agree with prepare.previous and
+// state.release). Split active ⇒ the released record (same validated truth
+// as derive(), same refusals); otherwise today's tag result, byte-identical
+// apart from the additive `source`.
 function current(cwd) {
+  const truth = splitTruth(cwd);
+  if (truth !== null) {
+    const { last } = truth;
+    const tag = `v${last.version}`;
+    return {
+      latest: tag,
+      version: last.version,
+      raw: tag,
+      tag,
+      source: 'promotion-record',
+      promotion_id: last.promotionId,
+    };
+  }
   const latest = ledger.latestTag(gitTags(cwd));
-  return { latest, version: latest ? latest.replace(/^v/, '') : null, raw: latest || '' };
+  return {
+    latest,
+    version: latest ? latest.replace(/^v/, '') : null,
+    raw: latest || '',
+    source: 'tag',
+  };
 }
 
 function dispatch(args, flags) {
@@ -215,4 +342,13 @@ function dispatch(args, flags) {
   throw new Error(`unknown release verb: ${verb || '(none)'} — use cut|prepare|changelog|current`);
 }
 
-module.exports = { nextVersion, changelogFrom, cut, prepare, current, dispatch };
+module.exports = {
+  ReleaseRefusal,
+  nextVersion,
+  changelogFrom,
+  derive,
+  cut,
+  prepare,
+  current,
+  dispatch,
+};

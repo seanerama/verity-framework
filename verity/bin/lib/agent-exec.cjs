@@ -77,6 +77,10 @@ const path = require('node:path');
 const { compareVersions, parseVersion } = require('./doctor.cjs');
 
 const { getProvider } = require('./agents/index.cjs');
+// Stage 94 (ADR-0031): the engine-owned provider TRUST table. The registry
+// above answers "is this driver reachable?"; the table answers "is this runtime
+// VETTED?" — two separate gates, and the second one gates unattended dispatch.
+const tiers = require('./agents/tiers.cjs');
 // The reference driver, required directly ONLY to keep this module's historic
 // exports intact (worker + tests import them from here); dispatch() always
 // goes through the registry.
@@ -92,6 +96,9 @@ const {
 // Stage 63 (ADR-0026, #176): worker-owned, idempotent `[stage N]` work-item
 // reconciliation, run post-plan behind a default-OFF flag (see below).
 const workItems = require('./work-items.cjs');
+// Stage 96 (ADR-0033, #189): the file-side sibling of the reconcile above —
+// the engine commits a git_write:false role's intent artifacts after the verdict.
+const intentArtifacts = require('./agents/intent-artifacts.cjs');
 
 const DEFAULT_AGENT = 'claude';
 // Stage 74 (#202 headroom): 40 was too low for a heavy role — a walking-skeleton
@@ -105,7 +112,7 @@ const DEFAULT_MAX_TURNS = 80;
 // run-id and role become path components under ~/.verity/logs — keep them tame.
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const USAGE =
-  'usage: verity agent-exec <role> [args...] --run-id <id> [--max-turns N] [--timeout-secs N] [--agent claude|codex] [--model M] [--sandbox S] [--approval A] [--acknowledge-gaps c1,c2] [--containment-tier 1|2] [--keep-workspace] [--state-snapshot JSON] [--substrate github|local]';
+  'usage: verity agent-exec <role> [args...] --run-id <id> [--max-turns N] [--timeout-secs N] [--agent claude|codex] [--model M] [--sandbox S] [--approval A] [--acknowledge-gaps c1,c2] [--containment-tier 1|2] [--keep-workspace] [--state-snapshot JSON] [--substrate github|local] [--worker-dispatch]';
 // ADR-0011 enforcement tiers. Tier 1 (stage 11: credential stripping +
 // mandatory post-run invariants) is what every codex run has had since that
 // stage and stays the DEFAULT. Tier 2 (stage 14: disposable shaped workspace +
@@ -131,6 +138,63 @@ const PRE_EXECUTION_SPAWN_ERRORS = new Set([
   'ENOMEM',
   'EINVAL',
 ]);
+
+// Stage 100 (ADR-0035): every top-level key dispatch() may emit, declared ONCE.
+// The result is assembled by spreads at many sites (buildResult, the driver's
+// annotate()/normalizeUsage() extras, enforced(), committed(), and the
+// work-item / intent-artifact wrappers), so no single literal lists the
+// surface — this does, and contracts/agent-result.md must document every entry
+// (tests/contract-pins.test.cjs pins that). Adding an emitted key means adding
+// it here AND to the contract text in the same PR.
+const RESULT_KEYS = Object.freeze([
+  // v1 base (REQUIRED — buildResult always emits these)
+  'schema',
+  'role',
+  'outcome',
+  'tokens',
+  'est_usd',
+  'wall_secs',
+  'tool_calls',
+  'artifacts',
+  'error',
+  // additive v1.x (OPTIONAL) — driver annotate() / normalizeUsage() extras
+  'provider',
+  'transcript_path',
+  'final_message_path',
+  'usage_detail',
+  'timed_out',
+  // additive v1.x (OPTIONAL) — containment / enforcement (ADR-0011)
+  'containment_tier',
+  'enforcement_gaps_acknowledged',
+  'containment_rejected',
+  'containment_merged',
+  'enforcement_violations',
+  'enforcement_reverted',
+  // additive v1.x (OPTIONAL) — engine-owned post-run steps
+  'git_lifecycle', // ADR-0012
+  'work_items', // ADR-0026
+  'intent_artifacts', // ADR-0033
+]);
+const RESULT_KEY_SET = new Set(RESULT_KEYS);
+
+// The single exit check for dispatch()'s result. A no-op returning the SAME
+// object untouched unless VERITY_STRICT_RESULT_KEYS === '1' — a test-only env
+// the test runner sets — so production output is byte-identical. Under the
+// strict env an undeclared top-level key throws, turning every dispatch-driving
+// test into a detector for contract drift.
+function declared(out) {
+  if (process.env.VERITY_STRICT_RESULT_KEYS !== '1' || out === null || typeof out !== 'object') {
+    return out;
+  }
+  for (const key of Object.keys(out)) {
+    if (!RESULT_KEY_SET.has(key)) {
+      throw new Error(
+        `undeclared agent-result key: ${key} — add it to RESULT_KEYS and contracts/agent-result.md (ADR-0035)`,
+      );
+    }
+  }
+  return out;
+}
 
 function firstLine(text) {
   return String(text || '')
@@ -233,6 +297,46 @@ function runDispatch(args, flags, session) {
       stderr(`verity-agent-exec: work-item-reconcile-failed: ${detail}`);
     }
     return { ...out, work_items: wi };
+  };
+  // Stage 96 (ADR-0033, #189): the worker-owned commit of a git_write:false
+  // role's INTENT artifacts (plan's stage-instructions/ contracts/
+  // feature-assessments/ docs/adr/, revisit's docs/revisit/). Boolean
+  // dark-launch flag like --reconcile-work-items: default-OFF ⇒
+  // withIntentArtifacts is inert and every result is byte-identical (no
+  // `intent_artifacts` key). Gated exactly as the reconcile is — the flag, a
+  // role in the engine-owned table, and a RECONCILE_PLAN_OUTCOMES outcome
+  // (success OR failed: a failed plan that still wrote valid specs must not
+  // lose them, stage-65 parity). A role outside the table returns the result
+  // UNCHANGED (no other run path is touched); a tabled role with an ineligible
+  // outcome (gated, infra_error) records `skipped` so the operator can see why
+  // nothing landed. Belt: the timeout path returns 'failed' with timed_out
+  // and never reaches these wrappers today — should it ever, a timed-out role
+  // must still commit nothing (ADR-0033 §4: never timeout / spawn / malformed).
+  const commitIntentArtifactsFlag = flags['commit-intent-artifacts'] !== undefined;
+  const withIntentArtifacts = (out) => {
+    if (!commitIntentArtifactsFlag || intentArtifacts.ROLE_ROOTS[role] === undefined) {
+      return out;
+    }
+    if (out.timed_out === true) {
+      return { ...out, intent_artifacts: { outcome: 'skipped', reason: 'timeout' } };
+    }
+    if (!RECONCILE_PLAN_OUTCOMES.has(out.outcome)) {
+      return { ...out, intent_artifacts: { outcome: 'skipped', reason: `outcome-${out.outcome}` } };
+    }
+    const ia = intentArtifacts.commitIntentArtifacts({
+      cwd,
+      role,
+      substrate,
+      outcome: out.outcome,
+    });
+    // Non-fatal, never silent (the stage-67 rule): a commit or push failure
+    // leaves the run's outcome unchanged and prints one §8.2-style stderr line.
+    if (ia.outcome === 'failed') {
+      stderr(`verity-agent-exec: intent-artifacts-commit-failed: ${ia.error}`);
+    } else if (ia.outcome === 'committed' && ia.pushed !== true) {
+      stderr(`verity-agent-exec: intent-artifacts-push-failed: ${ia.error}`);
+    }
+    return { ...out, intent_artifacts: ia };
   };
   const runId = flags['run-id'];
   if (typeof runId !== 'string' || !SAFE_ID.test(runId)) {
@@ -338,6 +442,12 @@ function runDispatch(args, flags, session) {
   // else is a usage error — never a silent fallback to the github projection,
   // which would hand a local run the gh/network grants this flag exists to
   // withhold.
+  // Stage 94 (ADR-0031): the worker-origin marker, a BOOLEAN flag (a value is
+  // ignored, like --keep-workspace / --reconcile-work-items). Omitted-in: the
+  // worker always passes it, a human never does, so its absence is exactly
+  // today's behavior. It grants nothing — it only says "no human is watching
+  // this dispatch", which is what makes the provider trust table apply.
+  const workerDispatch = flags['worker-dispatch'] !== undefined;
   const rawSubstrate = flags.substrate;
   const substrate = rawSubstrate === undefined ? 'github' : String(rawSubstrate);
   if (rawSubstrate !== undefined && substrate !== 'github' && substrate !== 'local') {
@@ -353,6 +463,33 @@ function runDispatch(args, flags, session) {
     provider = getProvider(agent);
   } catch (err) {
     return infra(err.slug || 'unsupported-agent', err.message);
+  }
+  // Stage 94 (ADR-0031): the DISPATCH-level trust gate. The eight
+  // capability-presence checks below are correct for what they do — each
+  // refuses a FLAG the driver cannot honor — but none of them refuses the
+  // DISPATCH, so a driver that implements nothing reads as "a runtime that
+  // needs nothing" rather than as "a runtime nobody vetted". This check closes
+  // that, and it is deliberately scoped to WORKER-ORIGINATED dispatches:
+  // registry membership makes a runtime usable by an explicit, interactive
+  // `--agent <id>` (which a human is watching), while the trust table is what
+  // clears it for the unattended worker. The origin is MECHANICAL, never
+  // inferred: `--worker-dispatch` is an omitted-in flag the worker passes and a
+  // human never does, exactly like --substrate / --state-snapshot — absent, this
+  // whole block is inert and every interactive run is byte-identical. The
+  // refusal is the contracts/agent-result.md `infra_error` shape (exit 30 + one
+  // machine-parsable stderr line), never a thrown usage error: an unattended
+  // caller must get a parseable object, not a stack.
+  if (workerDispatch) {
+    const tier = tiers.getTier(agent);
+    if (tier === null) {
+      return infra('untiered-provider', tiers.untieredProviderMessage(agent, 'worker dispatch'));
+    }
+    if (tier.worker_selectable !== true) {
+      return infra(
+        'untiered-provider',
+        `provider '${agent}' has a trust-table entry but is NOT cleared for worker selection (worker_selectable: false, ADR-0031) — it is usable by an explicit interactive \`verity agent-exec --agent ${agent}\` and refused for unattended dispatch; clear it in verity/bin/lib/agents/tiers.cjs, with an ADR, if that is intended`,
+      );
+    }
   }
   // ADR-0008: a provider without the max-turns concept REJECTS the flag with a
   // clear usage error — never accepts and silently ignores a limit the
@@ -783,17 +920,25 @@ function runDispatch(args, flags, session) {
   // flag-OFF creator (unchanged for Claude). Keyed on role === 'plan' and a
   // success/failed outcome (enforced() may have downgraded the outcome), so no
   // other run path is touched.
+  //
+  // Stage 96 (ADR-0033, #189): withIntentArtifacts sits INSIDE withWorkItems
+  // and OUTSIDE enforced() — after the invariants verdict and committed()
+  // (so the engine's own ref movement is never read as a role violation), and
+  // BEFORE the reconcile (so `[stage N]` work-items reference TRACKED files).
+  // Default-OFF ⇒ inert, byte-identical.
   return withWorkItems(
-    enforced(
-      result(outcome, {
-        tokens,
-        est_usd: estUsd,
-        tool_calls: toolCalls,
-        artifacts,
-        error,
-        ...notes,
-        ...usageExtra,
-      }),
+    withIntentArtifacts(
+      enforced(
+        result(outcome, {
+          tokens,
+          est_usd: estUsd,
+          tool_calls: toolCalls,
+          artifacts,
+          error,
+          ...notes,
+          ...usageExtra,
+        }),
+      ),
     ),
   );
 }
@@ -848,10 +993,15 @@ function readParkedResult(flags = {}) {
 // been fully computed, so the Verity-performed commit still lands on the stage
 // branch before the checkout moves back. Providers without the git-lifecycle
 // hooks register nothing, so their path is byte-identical.
+//
+// Stage 100: runDispatch has exactly one caller — this — so wrapping its value
+// in declared() covers EVERY return path (the pre-spawn infra refusals, the
+// timeout / spawn-failed / malformed-output paths, and the wrapped success
+// path) at one site; declared() is a no-op outside the test runner.
 function dispatch(args, flags) {
   const session = { restore: null };
   try {
-    return runDispatch(args, flags, session);
+    return declared(runDispatch(args, flags, session));
   } finally {
     if (session.restore !== null) {
       session.restore();
@@ -867,10 +1017,12 @@ module.exports = {
   DEFAULT_MAX_TURNS,
   MIN_CLAUDE_VERSION: claude.MIN_CLAUDE_VERSION,
   RESULT_CONTRACT,
+  RESULT_KEYS,
   SCHEMA,
   checkAgentVersion: claude.checkVersion,
   compareVersions,
   countToolCalls: claude.countToolCalls,
+  declared,
   dispatch,
   exitCodeFor,
   extractMarker,

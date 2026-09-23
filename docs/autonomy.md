@@ -576,6 +576,31 @@ role's behalf`). An effect the worker does not recognize is **ignored with a
 logged note — never executed, never guessed at, never fatal**. Merge authority
 is not an effect and never will be: the trust ladder stays the only merge path.
 
+**Intent artifacts are committed after the result** (ADR-0033, #189 — the
+file-side sibling of the ADR-0026 work-item reconcile). `plan` and `revisit`
+are `git_write: false` by contract, so nothing ever committed what they wrote:
+plan's `stage-instructions/`, `contracts/`, `feature-assessments/`,
+`docs/adr/` and revisit's `docs/revisit/` stayed dirty and unpushed on both
+providers and both substrates. With `agent.commit_intent_artifacts: true`
+(default **off**; per-role override under `agent.roles`), the worker passes
+`--commit-intent-artifacts` on the roles it dispatches (`plan`; the worker
+never dispatches `revisit`, whose engine commit is reachable only by a direct
+`verity agent-exec revisit --commit-intent-artifacts`) and, after the role
+returns with `success` or `failed` — never on a timeout — the **engine** stages
+only those engine-owned roots (`git add --ignore-removal`, never deletions,
+never paths outside them), commits under the `verity-worker` identity, and
+pushes to the substrate's `origin` (the local bare origin on
+`substrate: local`). It commits only on the default branch: a checkout parked
+elsewhere, or a detached HEAD, is refused and reported, never committed.
+Nothing new under the roots is a no-op, never an empty commit. A commit or
+push failure leaves the run's outcome unchanged, prints one
+`intent-artifacts-commit-failed` / `intent-artifacts-push-failed` stderr line,
+and is recorded on the result's optional `intent_artifacts` field. The step
+runs after the invariants verdict and before the work-item reconcile, so
+`[stage N]` issues reference tracked files and the engine's own ref movement is
+never read as a role violation. Interactive `/verity:plan` and
+`/verity:revisit` runs are unchanged — a human commits by hand, as now.
+
 Claude (uncontained) dispatches are unaffected — the flag is rejected for the
 claude driver rather than silently ignored, its prompts render byte-identically,
 and its harness keeps performing its own GitHub reads.

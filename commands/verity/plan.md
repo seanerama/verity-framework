@@ -66,6 +66,8 @@ a feature-assessment, and a linked GitHub work-item.
    > the worker reconcile is idempotent and will not duplicate.
 
 8. Hand the stage instruction + contracts to the Stage Manager (/verity:build).
+   In headless runs the engine commits your artifacts after you return (ADR-0033);
+   interactively, commit them yourself.
 
 **Mode A (initial decomposition) — plan ONLY the first buildable slice, not the
 whole architecture.** Run steps 3–7 as a batch over the architecture, but bound

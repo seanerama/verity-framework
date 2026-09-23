@@ -518,10 +518,12 @@ test('seam: agent-exec module.exports surface is intact (worker/test compatibili
     'DEFAULT_MAX_TURNS',
     'MIN_CLAUDE_VERSION',
     'RESULT_CONTRACT',
+    'RESULT_KEYS', // stage 100 (ADR-0035): the declared agent-result key surface
     'SCHEMA',
     'checkAgentVersion',
     'compareVersions',
     'countToolCalls',
+    'declared', // stage 100: the strict-key exit check (no-op outside the test runner)
     'dispatch',
     'exitCodeFor',
     'extractMarker',

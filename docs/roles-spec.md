@@ -215,7 +215,7 @@ Forensic interview of the real build (Switchboard) added these to the design. De
 
 **Inherited from 1.4 (shipped in 1.4.0):** orchestrator reads a stage instruction, creates the branch, delegates the build to ONE isolated sub-agent (own context window), verifies the return. Sequential.
 
-**Executor lifetime = ONE STAGE (ADR-0004).** "Isolated, own context window" is *not* satisfied by a long-lived executor resumed stage after stage. The executor is **born at branch creation and dies at merge**: spawned fresh per stage, resumable without restriction *within* its own stage (red-CI loop, acceptance kick-back, a Reviewer's REQUEST-CHANGES), never across a stage boundary. Rationale: a resumed executor recalls contracts as they were N stages ago — unversioned memory defeating the frozen-contract discipline — and its context grows quadratically over the backlog. Everything it would retain is on disk and re-passed at spawn. **Contracts are re-read from `contracts/`, never recalled.** The inline fallback (no sub-agent support) inherits the same obligation: re-read contracts and standards per stage rather than trust what is already in the conversation.
+**Executor lifetime = ONE STAGE (ADR-0004).** "Isolated, own context window" is *not* satisfied by a long-lived executor resumed stage after stage. The executor is **born at branch creation and dies at merge**: spawned fresh per stage, resumable without restriction *within* its own stage (red-CI loop, acceptance kick-back, a Reviewer's REQUEST-CHANGES), never across a stage boundary. Rationale: a resumed executor recalls contracts as they were N stages ago — unversioned memory defeating the frozen-contract discipline — and its context grows quadratically over the backlog. Everything it would retain is on disk and re-passed at spawn. **Contracts are re-read from `contracts/`, never recalled.** The inline path (reached only when the capability probe shows Task support genuinely denied — not a judgment call) inherits the same obligation: re-read contracts and standards per stage rather than trust what is already in the conversation.
 
 **Changed for this framework:**
 1. **"Done" = PR opened + CI all-green**, NOT merge-to-main. The Stage Manager **never merges** — it stops at a green PR and hands to the **Reviewer/Integrator** (adversarial separation: builder doesn't merge own work).
@@ -226,7 +226,7 @@ Forensic interview of the real build (Switchboard) added these to the design. De
 **Flow (orchestrator = brain+notebook · executor = isolated sub-agent):**
 1. **Load stage context** *(notebook)* — stage-instruction + relevant contracts + cross-cutting standards (architecture/ADRs) + design-system/committed assets + acceptance conditions. Confirm `depends-on` stages are merged (derived state) before starting.
 2. **Create branch** *(notebook)* — `feat/stage-N-<slug>` off current `main` (includes all merged prior stages).
-3. **Probe capability** *(notebook)* — sub-agent/Task support (capability registry)? yes → delegate; no → inline (1.4 fallback).
+3. **Probe capability** *(notebook)* — sub-agent/Task support (capability registry)? yes → delegate. **Delegation is not optional**: inline is reachable only when the probe shows the Task tool is genuinely denied (a headless run whose `.tools.json` omits it), never as a judgment call — and an inline build must be **declared in the handoff**.
 4. **Delegate to Stage Executor** *(isolated sub-agent, **spawned fresh for this stage** — ADR-0004)* — pass stage instruction + contracts + standards + branch name + acceptance conditions + executor rules. Executor:
    - implements code respecting **frozen contracts**;
    - writes unit/integration/contract tests **+ the UI-smoke test asset** if user-facing;
@@ -369,6 +369,8 @@ Forensic interview of the real build (Switchboard) added these to the design. De
 ---
 
 ## Role 11 — Retrofit Planner (existing-project path; "retrofit the SPINE onto existing code")
+
+> Shipped as `/verity:revisit` in its proposal-only form — see ADR-0032. The write steps (lock, freeze, scaffold, seed STATUS) route through vision/architect/plan/build.
 
 **Most directly-validated role in the spec:** the real build WAS a retrofit (born at v0.1.0, ~50-file working app with NO CI/issue-templates/STATUS — B3), and **D4 was a botched retrofit** (9 stages "done" before CI ever ran; first run exploded with 4 failures + multi-day fixture debt). This role makes that impossible.
 

@@ -939,6 +939,10 @@ module.exports = {
   WORK_ITEMS_DIR,
   GATE_RUNS_DIR,
   branchSlug,
+  // Stage 96 (ADR-0033): agents/intent-artifacts.cjs reuses the ONE default-
+  // branch resolver rather than writing a third (git-lifecycle.resolveBase is
+  // the other; both read `refs/remotes/origin/HEAD` first).
+  defaultBranchRef,
   fetchLocalSnapshot,
   listWorkItems,
   localPrHead,

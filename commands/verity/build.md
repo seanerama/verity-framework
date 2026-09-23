@@ -45,7 +45,12 @@ green PR — this role NEVER merges (the builder must not merge its own work).
    - run the tests to green; work ONLY on the given branch — **no branch creation, no merge**;
    - return ONLY: files changed, test results, deviations, "new contract needed?" (should be none).
    Never paste file contents back.
-   - **Runtime fallback:** if the harness has no sub-agent/Task support, implement inline.
+   - **This delegation is not optional.** Implementing the stage inline is the single
+     biggest context cost in the workflow, and this role's whole point is that the
+     build happens somewhere else. Implement inline ONLY when the Task tool is
+     genuinely denied — i.e. a headless run whose `.tools.json` omits it, which is
+     already an isolated per-role process. If that happens, say so explicitly in the
+     handoff; never take it as a judgment call.
 
 4. Verify the executor's return against the stage's acceptance conditions
    (`verity review checklist $ARGUMENTS` shows them): kill-switch present for features,

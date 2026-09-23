@@ -114,4 +114,8 @@ function dispatch(args, flags) {
   throw new Error(`unknown status verb: ${verb} — use show|set|note|secret|render`);
 }
 
-module.exports = { DEFAULTS, runtimePath, read, render, show, set, append, dispatch };
+// `write` is exported (stage 91) so a caller that must change SEVERAL fields
+// from one read — `promotion finalize` stamping version/deployed_at/
+// rollback_from together — can do it as a single write + single render, rather
+// than three `set` round-trips that each re-read and re-render.
+module.exports = { DEFAULTS, runtimePath, read, write, render, show, set, append, dispatch };

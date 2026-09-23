@@ -65,9 +65,30 @@ Frozen semantics:
   both exist, `.tools.json` governs Claude and this contract governs everyone
   else.
 
+### Additive v1.x fields (ADR-0035)
+
+```json
+{
+  "capabilities": {
+    "write_protected_paths": false
+  }
+}
+```
+
+- **`write_protected_paths`** — boolean, OPTIONAL, defaults to `false` when
+  absent (additive v1.x, stage 9; present in
+  `schemas/role-permissions.schema.json`): whether the role's edits may touch
+  the protected roots `.github/**` and `.verity/**`. When `false`, the post-run
+  invariant check (`agents/invariants.cjs`) flags any change under those roots
+  as a violation.
+
 ## Versioning
 
 Frozen at **v1**. Changes are **additive only** — new capability keys and new
 provider sections may be added (defaulting closed); redefining an existing key
 or loosening a default is a NEW contract, not an edit (framework-spec §4.3).
 Every consumer depends on this shape.
+
+Amended additively 2026-09-23 per ADR-0035: documented the optional
+`write_protected_paths` capability key (default `false`, enforced by
+`agents/invariants.cjs`).

@@ -6,8 +6,9 @@
 //
 //   VERITY_REAL_CODEX_TEST=1 node scripts/run-tests.cjs
 //
-// Default CI stays stub-based: without the env var this file registers NO real
-// cases and prints each of them as SKIPPED. That is deliberate and load-bearing
+// Default CI stays stub-based: without the env var this file runs NO real case —
+// each is registered with a skip() body, so the runner tallies it as SKIPPED in
+// its summary line (stage 99). That is deliberate and load-bearing
 // — a lane that quietly reports "passed" while never touching a real binary is
 // the exact failure mode ADR-0011 exists to end ("a stub-verified external
 // contract is not evidence"). Skipped says skipped, in the runner's output,
@@ -378,6 +379,10 @@ const CASES = [
 // --- registration ----------------------------------------------------------------
 
 let registered = 0;
+// Gate off: the skip() bodies registered in place of the real cases, kept so the
+// lane's own contract test can prove each one ends in a skip, never a pass.
+const SKIP_REASON = `${GATE} not set — opt-in lane`;
+const skipBodies = [];
 // Non-null once the gate is ON and this machine cannot authenticate (issue
 // #40). It is a FAILURE state, distinct from both "gate off" (skipped) and
 // "cases ran" — the three are never confusable in the runner's output.
@@ -401,12 +406,17 @@ if (ENABLED) {
     }
   }
 } else {
-  // VISIBLY skipped. Not registered as passing tests, not silent.
-  console.log(`  ⊘ SKIPPED (${CASES.length} cases): real-Codex lane is opt-in.`);
-  console.log(`    Enable with ${GATE}=1 and an authenticated \`${BIN}\` on PATH.`);
+  // VISIBLY skipped (stage 99): every case is registered under its real name and
+  // its body is skip(), so the runner tallies each one as SKIPPED in the summary
+  // line — counted, never a pass, never silently absent.
+  console.log(
+    `    real-Codex lane is opt-in: enable with ${GATE}=1 and an authenticated \`${BIN}\` on PATH.`,
+  );
   console.log(`    Codex auth root the lane would use: CODEX_HOME=${CODEX_HOME}`);
   for (const c of CASES) {
-    console.log(`  ⊘ SKIPPED: real-codex: ${c.name}`);
+    const body = () => skip(SKIP_REASON);
+    skipBodies.push(body);
+    test(`real-codex: ${c.name}`, body);
   }
 }
 
@@ -419,8 +429,26 @@ test('real-codex lane: opt-in only, and skipped-not-passed when the gate is off'
     ENABLED && refused === null ? CASES.length : 0,
     ENABLED
       ? 'with the gate on, either every real case is registered or the lane failed its auth precondition'
-      : 'with the gate off NO real case is registered — they are printed as SKIPPED, never counted as passes',
+      : 'with the gate off NO real case body is registered — only skip() bodies',
   );
+  // Gate off: one skip() body per case, each ending in the runner-owned
+  // SkipSignal — tallied as skipped in the summary, never counted as a pass.
+  assertEqual(skipBodies.length, ENABLED ? 0 : CASES.length, 'one registered skip per gated case');
+  for (const body of skipBodies) {
+    let thrown = null;
+    try {
+      body();
+    } catch (err) {
+      thrown = err;
+    }
+    assert(thrown !== null, 'a gated-off case can never complete as a pass');
+    assertEqual(
+      thrown.name,
+      'SkipSignal',
+      'it ends in the runner-owned skip signal (tallied as skipped)',
+    );
+    assertEqual(thrown.message, SKIP_REASON, 'and the skip reason names the gate to flip');
+  }
   // The lane must keep covering both containment tiers plus a positive; a case
   // deleted in a hurry should break this, not quietly shrink the canary.
   const names = CASES.map((c) => c.name).join(' | ');
