@@ -99,6 +99,7 @@ test('SNAPSHOT: state view (full projection) is byte-identical', () => {
   const expected = {
     online: true,
     release: null,
+    release_source: 'tag',
     stages: [
       {
         number: 1,

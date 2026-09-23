@@ -3,9 +3,9 @@
 // scenario runs against a tiny fixture package (own package.json + vendored
 // lockfile + trivial test) so npm ci/lint/test/pack never touch the network.
 // The baseline byte-match is the ONE network path and follows the house opt-in
-// lane pattern (tests/real-codex.test.cjs): it registers a real case only under
-// VERITY_PROMOTION_BASELINE_TEST=1 and is printed as SKIPPED — never counted as
-// a pass — when the gate is off.
+// lane pattern (tests/real-codex.test.cjs): it runs the real case only under
+// VERITY_PROMOTION_BASELINE_TEST=1; with the gate off the case calls skip() and
+// is tallied as SKIPPED in the runner's summary — never counted as a pass.
 const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -323,48 +323,65 @@ test('CLI: --baseline without the env gate SKIPS LOUDLY; exit reflects offline g
 
 // --- the opt-in NETWORK lane (house pattern: tests/real-codex.test.cjs) ------
 //
-// With the gate off this registers NO network case and prints it as SKIPPED —
-// skipped says skipped, never counted as a pass. With VERITY_PROMOTION_BASELINE_TEST=1
+// With the gate off the network case is registered but calls skip() — tallied as
+// SKIPPED in the runner's summary, never counted as a pass. With VERITY_PROMOTION_BASELINE_TEST=1
 // it performs the real Phase-1 exit criterion: project v1.1.0 from THIS repo,
 // verify the staging tree, and byte-match the packed tarball against the
 // published verity-framework@1.1.0 npm artifact.
-let registered = 0;
+//
+// Stage 99: the gated case is ALWAYS registered under the same name. With the
+// gate off its body is `skip()`, so the runner tallies it as SKIPPED in the
+// summary line — visible in the count, never a pass, never silently absent.
+const BASELINE_NAME = 'REAL baseline: project v1.1.0 → verify --baseline 1.1.0 byte-matches npm';
+const BASELINE_SKIP_REASON = `${GATE} not set — opt-in lane`;
 
-if (ENABLED) {
-  registered += 1;
-  test('REAL baseline: project v1.1.0 → verify --baseline 1.1.0 byte-matches npm', () => {
-    const projected = promotion.project('v1.1.0', { cwd: REPO_ROOT });
-    assertEqual(projected.verdict, 'built', 'v1.1.0 projection built');
-    const r = promotion.verify(projected.staging_dir, {
-      cwd: REPO_ROOT,
-      report: projected.report_path,
-      baseline: '1.1.0',
-    });
-    assertEqual(r.exit_code, 0, `verify exit (verify block: ${JSON.stringify(r.verify)})`);
-    assertEqual(r.verify.baseline.match, true, 'published tarball byte-match');
-    assertEqual(
-      r.verify.baseline.local_shasum,
-      r.verify.baseline.published_shasum,
-      'local pack sha1 equals the registry dist.shasum',
-    );
-    rm(projected.staging_dir);
-    rm(projected.report_path);
+function realBaselineCase() {
+  const projected = promotion.project('v1.1.0', { cwd: REPO_ROOT });
+  assertEqual(projected.verdict, 'built', 'v1.1.0 projection built');
+  const r = promotion.verify(projected.staging_dir, {
+    cwd: REPO_ROOT,
+    report: projected.report_path,
+    baseline: '1.1.0',
   });
-} else {
-  console.log('  ⊘ SKIPPED: baseline byte-match lane is opt-in (network + real npm registry).');
-  console.log(`    Enable with ${GATE}=1.`);
-  console.log('  ⊘ SKIPPED: REAL baseline: project v1.1.0 → verify --baseline 1.1.0');
+  assertEqual(r.exit_code, 0, `verify exit (verify block: ${JSON.stringify(r.verify)})`);
+  assertEqual(r.verify.baseline.match, true, 'published tarball byte-match');
+  assertEqual(
+    r.verify.baseline.local_shasum,
+    r.verify.baseline.published_shasum,
+    'local pack sha1 equals the registry dist.shasum',
+  );
+  rm(projected.staging_dir);
+  rm(projected.report_path);
 }
 
-test('baseline lane: opt-in only, and skipped-not-passed when the gate is off', () => {
+const baselineBody = ENABLED ? realBaselineCase : () => skip(BASELINE_SKIP_REASON);
+test(BASELINE_NAME, baselineBody);
+
+test('baseline lane: opt-in only; with the gate off it is registered and tallied as skipped, never a pass', () => {
   assertEqual(ENABLED, process.env[GATE] === '1', `the gate is exactly ${GATE}=1`);
+  if (ENABLED) {
+    assertEqual(
+      baselineBody,
+      realBaselineCase,
+      'with the gate on the real baseline case is registered',
+    );
+    return;
+  }
+  // Gate off: the registered body must end in the runner's SkipSignal — which
+  // the runner tallies under `skipped` — and can never complete as a pass.
+  let thrown = null;
+  try {
+    baselineBody();
+  } catch (err) {
+    thrown = err;
+  }
+  assert(thrown !== null, 'with the gate off the registered case can never complete as a pass');
   assertEqual(
-    registered,
-    ENABLED ? 1 : 0,
-    ENABLED
-      ? 'with the gate on the real baseline case is registered'
-      : 'with the gate off NO network case is registered — printed as SKIPPED, never a pass',
+    thrown.name,
+    'SkipSignal',
+    'it ends in the runner-owned skip signal (tallied as skipped)',
   );
+  assertEqual(thrown.message, BASELINE_SKIP_REASON, 'and the skip reason names the gate to flip');
 });
 
 // fixture cleanup

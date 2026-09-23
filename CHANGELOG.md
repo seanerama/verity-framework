@@ -1,5 +1,176 @@
 # Changelog
 
+## 1.4.0
+
+### Added
+
+- **Contract pinning tests (ADR-0035 follow-on, stage 100).** The five frozen
+  contracts amended on 2026-09-23 (`agent-result`, `operator-act`,
+  `production-projection`, `promotion-records`, `role-capability-policy`) are
+  now CI invariants: `tests/contract-pins.test.cjs` derives each contract's
+  documented keys from its own text (`tests/lib/contract-doc.cjs`) and asserts
+  they cover what the engine emits — observed from hermetic fixtures, the
+  engine's literals, and the role-permissions schema — with a negative pin per
+  contract proving the checks are not vacuous. The agent-result surface is
+  declared once as `RESULT_KEYS` in `agent-exec.cjs`; the test runner sets
+  `VERITY_STRICT_RESULT_KEYS=1`, under which `dispatch()` throws on any
+  undeclared top-level key, so every dispatch-driving test is a drift detector.
+  Production output is byte-identical (the check is a no-op without the env).
+
+- **`/verity:revisit` — a read-only re-entry audit of any project (ADR-0032).**
+  The 16th role: the command to run when coming back to a project after time
+  away, or picking up one that was never on Verity. It probes for
+  `.verity/identity.json` and runs in one of two modes. *Verity mode* composes
+  the existing read-side CLI (`state`, `next`, `status`, `stage list`,
+  `contract list`, `adr list`, `handoff list`, `golive`, `doctor`) and GitHub
+  reads into a "where it stands" section, then re-audits every prior decision
+  (ADRs, frozen contracts, the golive list, test honesty, dependency drift, docs
+  rot) as a claim to re-verify. *Adoption mode* is the proposal-only projection
+  of the roles spec's Retrofit Planner: identity candidates with flagged
+  inconsistencies, contract candidates, the missing spine, and a hardening-first
+  backlog whose first proposal is always the "first green on legacy code" gate.
+  Its only write is a dated report, `docs/revisit/<date>-revisit.md`; it never
+  writes `stage-instructions/`, `contracts/`, `STATUS.md`,
+  `.verity/identity.json`, or project code, and a `verity state` refusal is
+  reported as `unverified`, never as "no open work". The `.tools.json` scopes
+  Claude's writes to `docs/revisit/**`; the policy is `workspace-write` with no
+  git/GitHub write, no network, no deploy. The worker never dispatches it —
+  `auto_advance`, labels, and gates are unchanged. Every role-count pin and doc
+  literal moves 15 → 16.
+
+### Changed
+
+- **Dev tree reconciled; revisit reports and codex dev notes tracked private
+  (stage 98).** `docs/revisit/*-revisit.md` (ADR-0032, byte-identical) and the
+  root `codex-support.md` / `codex-readiness-findings.md` /
+  `codex-ollama-local-findings.md` notes are now tracked with `private`
+  classification rules; `benchmark/results/`, `*:Zone.Identifier` and `*.bak`
+  are gitignored; the stray `docs/handoff/arcade-lobby-brief.md` fixture brief
+  is removed. The projected tree is unchanged.
+
+- **Provider trust is an explicit allowlist; an un-tiered runtime is refused
+  (ADR-0031).** Every containment decision used to be written as a denylist of
+  one provider, so a newly added runtime landed on the maximum-trust side of
+  each branch by omission — the only thing holding the line was the
+  `agent.provider` enum. Trust now lives in an engine-owned provider trust
+  table: a runtime with no entry is refused for worker selection and for
+  `mode: autonomous` (a machine-readable `untiered-provider` refusal, exit 30),
+  and the merge ladder consults the reviewing runtime's merge authority before a
+  verdict can reach a merge. Being in the driver registry makes a runtime
+  *usable* interactively; being in the table is what makes it *trusted*, and
+  `verity doctor` reports a registered-but-un-tiered runtime honestly. The
+  autonomy enum, the JSON schema, and `verity doctor`'s supported-agent list all
+  read from the table, so they cannot drift. `claude` and `codex` carry exactly
+  the profile their existing branches implemented — every current run is
+  byte-identical.
+- **Context discipline is now a shared preamble on every role.** A new
+  `preamble-delegation.md.tmpl` block joins the ADR-0002 transform pipeline as
+  its second *unconditional* entry, so all 15 roles get it at install time on
+  all three hosts (`claude` / `opencode` / `codex`): delegate bulk work to a
+  sub-agent and take back a summary, stay inside your own artifacts, read
+  narrowly. Previously only `build` carried any delegation language — every
+  other role ran all of its work in the main loop with nothing telling it
+  otherwise.
+- **Architect designs; it never builds.** Its description said it "owns the
+  walking skeleton" while step 6 said "define" it — the contradiction let a
+  real session scaffold an entire repo inline (46 writes, 38 edits, 103 shell
+  calls, 346 turns). It now says *define*, carries a `<non-goals>` block naming
+  implementation, `stage-instructions/`, and `STATUS.md` as out of scope, and
+  step 6 spells out what "define" produces. Stage 0 is built by `/verity:build`
+  from a `/verity:plan` spec like any other stage — so it gets a branch, a PR,
+  CI, and a reviewer.
+- **`build`'s delegation is no longer optional.** The old "if the harness has no
+  sub-agent/Task support, implement inline" line was a judgment-call escape
+  hatch out of the one thing that role exists to do. Inline implementation is
+  now permitted only when the Task tool is genuinely denied by a headless
+  `.tools.json`, and must be declared in the handoff. `docs/roles-spec.md` and
+  `docs/framework-spec.md` are reconciled to match: the runtime capability
+  probe stays, the judgment call goes.
+
+Regression tests cover all three (`tests/render-pipeline.test.cjs`): every role
+carries the block exactly once, the `build` escape hatch cannot return, and
+architect keeps its non-goals. **Existing installs need `verity install` re-run
+to pick up the new preamble** — this ships the template, not the installed
+copies.
+
+### Fixed
+
+- **Test-runner honesty: a returned Promise fails loud, skips are tallied as
+  skips (stage 99; revisit 2026-09-22 proposal 5).** `scripts/run-tests.cjs`
+  ignored a test body's return value, so an `async` test "passed" before its
+  assertions ran, and a test that returned early (the actionlint case in
+  `tests/actions.test.cjs`, live in CI) was tallied as a pass. A body that
+  returns a thenable is now a **failure**; the new `skip(reason)` global is
+  tallied and printed as `⊘ <name> — <reason>`, never a pass (a reason-less
+  `skip()` is a failure); the summary line is `N passed, M skipped, K failed`;
+  `VERITY_TEST_FORBID_SKIPS=1` turns every skip into a failure for a lane that
+  must be complete; `VERITY_TESTS_DIR` overrides the discovery directory. The
+  three ad-hoc skip conventions (actionlint, the real-Codex lane, the promotion
+  baseline lane) now all use `skip()`, so gated-off cases are counted in the
+  summary instead of printed outside it. Synchronous tests behave exactly as
+  before; the CI invocation is unchanged.
+
+- **Split-aware release derivation and state (ADR-0034; revisit 2026-09-22
+  proposal 3).** With `split_active: true`, `release prepare` / `release cut`
+  (and `--dry-run`) derive `previous` and the commit range from the highest
+  `status: released` promotion record (`version`, `development.commit`), never
+  from a dev tag — `release prepare --bump minor` on this repository now yields
+  1.4.0 over the post-1.3.0 commits instead of re-deriving the shipped 1.3.0 over
+  everything since the hand-made `v1.2.0` mirror. `verity state` reports the
+  same number (`release: v1.3.0` here) and adds `release_source:
+  "promotion-record" | "tag"`. Split active with no released record fails
+  closed (`no-released-promotion`, exit 20) in all three verbs — no silent
+  tag fall-back; a computed version that is already released is refused
+  (`version-already-released`, both modes). The PROM record reader skips
+  full-line `#` comments (PROM-0001 carries two). Non-split repositories are
+  byte-identical; `promotion finalize` is unchanged and still creates no dev
+  tag. `contracts/operator-*` key sets are untouched.
+- **Intent artifacts written by `git_write:false` roles now reach the default
+  branch (dev#189, ADR-0033).** `plan`'s `stage-instructions/`, `contracts/`,
+  `feature-assessments/`, `docs/adr/` and `revisit`'s `docs/revisit/` were never
+  committed: the ADR-0012 lifecycle engages only for a `git_write` grant, and a
+  later build's `begin` excluded the pre-existing dirt from its own commit, so
+  the specs rode along locally and were never pushed — on both providers and
+  both substrates. Behind `agent.commit_intent_artifacts: true` (default off;
+  per-role override), the **engine** now commits those engine-tabled roots after
+  the role returns with `success` or `failed`: additively by pathspec (never
+  deletions, never paths outside the roots), idempotently (nothing new ⇒ no
+  commit), under the `verity-worker` identity, pushed to the substrate's
+  `origin`, and non-fatally — a commit or push failure keeps the run's outcome,
+  prints one `intent-artifacts-*-failed` stderr line, and is recorded on the
+  result's optional `intent_artifacts` field. It runs after the invariants
+  verdict and before the ADR-0026 work-item reconcile. Off is byte-identical.
+
+### Merged commits (generated from Conventional Commits; `dev#NN` = dev-repo PR)
+
+#### Features
+- stamp runtime truth at finalize — .verity/runtime.json + STATUS.md (stage 91) (dev#249)
+
+#### Chores
+- reconcile the untracked working tree — track cited dev docs + revisit reports private, ignore results/sidecars, drop stray brief (stage 98) (dev#262)
+- refresh runtime truth to 1.3.0 — STATUS.md/.verity/runtime.json were stale at 1.1.0 (skipped for both the 1.2.0 and 1.3.0 promotions)
+- record PROM-0002 — finalize v1.3.0 released (prod tag v1.3.0)
+- record PROM-0002 — propose v1.3.0 (prod PR 2)
+
+#### Other
+- docs(changelog): fold the stranded second [Unreleased] block into 1.2.0 as detailed notes; track docs/verity-journeys.html
+- [stage 100] Contract pinning tests: each amended contract's documented key set covers what the engine emits, with the agent-result surface declared once and enforced strictly under the test runner (dev#266)
+- plan(stage-100): contract pinning tests — spec + assessment (refs dev#265, ADR-0035)
+- architect: contract amendment pass — five frozen v1 contracts document the emitted surface (ADR-0035, additive, 0 deletions)
+- plan(proposal-6): contract amendment pass — route to /verity:architect, assessment
+- [stage 99] Test-runner honesty: a returned Promise fails loud, skips are tallied as skips not passes, one skip() convention across the suite (dev#264)
+- plan(stage-99): test-runner honesty — spec + assessment (refs dev#263)
+- plan(stage-98): reconcile the untracked working tree — spec + assessment (refs dev#261)
+- [stage 97] Split-aware release derivation and state: previous version and commit range come from the released promotion record, never from a dev tag (dev#260)
+- plan(stage-97): split-aware release derivation and state — ADR-0034, spec + assessment (refs dev#259)
+- [stage 96] Worker-owned commit of intent artifacts: stage-instructions, contracts, assessments, ADRs and revisit reports reach the default branch after a git_write:false role returns (dev#258)
+- plan(stage-96): worker-owned commit of intent artifacts — ADR-0033, spec + assessment (refs dev#257, dev#189)
+- [stage 95] Revisit role: read-only re-entry audit of any project, Verity or not (dev#256)
+- [stage 94] Provider trust tiers: containment is an allowlist, unknown providers fail closed (dev#254)
+- [stage 93] Promotion finalize reports publish truth: the prod v* tag triggers publish.yml (O4 resolved) (dev#252)
+- docs(decisions): resolve O4 — npm Trusted Publishing (OIDC), no stored token
+- [stage 92] Reland context-discipline: delegation preamble on every role, architect designs never builds (dev#251)
+
 ## 1.3.0
 
 ### Features
@@ -188,9 +359,9 @@ Versions 0.3.x were developed in the `verity-auto` incubator fork (forked at
 `0.2.2`, reunified in `0.4.0`). See [docs/whats-different.md](docs/whats-different.md)
 for the autonomy layer those versions added.
 
-## [Unreleased]
+### Detailed notes (hand-written before the 1.2.0 cut; the generated section above summarizes the same release)
 
-### Added
+#### Added
 
 - **`verity promotion finalize <version>` — prod-side tag and release from a
   merged promotion PR** (stage 44, dev#107 Phase 3). Completes the
@@ -257,7 +428,7 @@ for the autonomy layer those versions added.
   malformed or wrong-schema file is a hard error (exit 20) — the guard is
   never silently off.
 
-### Documentation
+#### Documentation
 
 - **knowing integration — recorded the decision not to add knowing at this
   time**, and rescoped the re-entry condition. The old trigger (a CommonJS
@@ -477,7 +648,7 @@ for the autonomy layer those versions added.
   - An idle tick that is idle *because* something is gated now says so, instead
     of reporting a bare "no eligible work".
 
-### Added
+#### Added
 
 - **`verity promotion verify <staging-dir>`** (stage 41, dev#107 Phase 1) — proves
   a projection is a working product, not just a filtered tree, extending the
@@ -719,7 +890,7 @@ for the autonomy layer those versions added.
   per-case pass/fail/INVALID table, limitations and the readiness decision.
   The results file itself is human-produced and is not part of this change.
 
-### Removed
+#### Removed
 
 - **The Codex enforcement projection that enforced nothing** (stage 11,
   ADR-0011): `commandRules()`, the per-role denial document written to the run
@@ -730,7 +901,7 @@ for the autonomy layer those versions added.
   explicit opt-in preview; tier 2 (disposable shaped workspace + gated
   merge-back) is still required before any UNATTENDED codex autonomy.
 
-### Changed
+#### Changed
 
 - **Pre-promotion doc cleanup: README private-link repair + CONTRIBUTING for
   the no-code-PRs model** (stage 45, dev#107 Phase 3 prep). README no longer
@@ -749,7 +920,7 @@ for the autonomy layer those versions added.
   releases carrying `RELEASE-MANIFEST.json` provenance. Local setup, test,
   and lint instructions stay: they serve anyone running the public tree.
 
-### Fixed
+#### Fixed
 
 - **Unknown cost was summed as `$0`, so the daily budget breaker could not
   trip** (stage 18, issue dev#51, ADR-0008 — found by the 2026-07-31 canary run,

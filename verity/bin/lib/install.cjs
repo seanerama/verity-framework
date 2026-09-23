@@ -2,7 +2,8 @@
 // Same role-command CONTENT, transformed into each harness's format + install
 // location. Claude Code is the reference harness; OpenCode is the second adapter.
 // Capability differences (no Task sub-agents / no hooks on OpenCode) are handled by
-// the commands' own "implement inline" fallback — the content already degrades.
+// the shared context-discipline preamble, which names the narrow case where a role
+// may work inline — the content already degrades.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -40,8 +41,18 @@ const TEMPLATES_DIR = path.join(PKG_ROOT, 'verity', 'templates');
 // contained render that was handed a Verity-gathered state snapshot (it
 // interpolates {{stateSnapshot}}, so it can only be true when facts exist).
 // Installs and every other host stay byte-identical, exactly like the git block.
+//
+// `preamble-delegation.md.tmpl` (stage 92) is the SECOND unconditional block:
+// every role gets the same context-discipline rule (delegate bulk work to a
+// sub-agent and take back a summary, stay inside your own outputs, read
+// narrowly). It is unconditional on purpose — the failure it prevents (a role
+// building a whole skeleton inline and blowing out the main-loop context) is
+// not role-specific, and only `build` previously carried any delegation
+// language at all. Unconditional blocks come first, before the conditional
+// ones, so the table order is: runtime, delegation, then the option-keyed pair.
 const PREAMBLES = [
   { template: 'preamble-runtime.md.tmpl', option: null },
+  { template: 'preamble-delegation.md.tmpl', option: null },
   { template: 'preamble-verity-git.md.tmpl', option: 'verityPerformsGit' },
   { template: 'preamble-verity-github.md.tmpl', option: 'verityPerformsGitHub' },
 ];

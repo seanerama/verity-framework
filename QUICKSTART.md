@@ -166,6 +166,14 @@ Honest per-capability status (matching the v1.1.0 release-notes classification):
 | Unattended local autonomy | Opt-in, **default OFF** | `mode: autonomous` requires `agent.containment_tier: 2`; refused below it |
 | GitHub Actions autonomy | **Deferred — local only** | ADR-0009 — never reuse local ChatGPT/Codex auth in Actions |
 
+**Two gates, not one.** Being in Verity's driver registry makes a runtime
+*usable* (`verity agent-exec --agent <id>` works, with a human watching); being
+in the engine-owned **provider trust table** is what makes it *trusted* —
+cleared for the unattended worker, for `mode: autonomous`, and for merge
+authority. `claude` and `codex` are in both. A runtime that is registered but
+un-tiered is refused for autonomy rather than defaulted into the maximum-trust
+profile, and `verity doctor` reports that state explicitly.
+
 ### Supervised local autonomy — minimal `.verity/autonomy.yml`
 
 ```yaml
@@ -221,5 +229,5 @@ Each failing row names its own remediation command; the common ones:
 - [**Autonomy guide**](docs/autonomy.md) — kill switch, modes, trust ladder, labels, approvals, cron + Actions + bot setup, cost tracking
 - [**Deploy kit**](docs/dev/deploy-kit/) — the `/verity:autonomy-setup` interview
 - [**Friction kit**](docs/dev/friction-kit/) — document your first run and capture friction
-- [**Usage guide**](docs/verity-usage.html) · [**Command reference**](docs/commands.md) — all 15 `/verity:*` roles
+- [**Usage guide**](docs/verity-usage.html) · [**Command reference**](docs/commands.md) — all 16 `/verity:*` roles
 - [**Canary checklist**](docs/dev/autonomy-canary-checklist.md) — the 2-week supervised run before trusting it more

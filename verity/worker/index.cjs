@@ -156,6 +156,10 @@
 // `git-unprovidable` (ADR-0012); `circuit-open` stays reserved for the actual
 // kill switch and for genuine breaker-READ failures.
 const agentExec = require('../bin/lib/agent-exec.cjs');
+// Stage 94 (ADR-0031): the engine-owned provider TRUST table. Every containment
+// decision below that used to ask "is this provider codex?" now asks the table
+// what the provider's profile IS — and an un-tiered provider is refused.
+const tiers = require('../bin/lib/agents/tiers.cjs');
 const autonomy = require('../bin/lib/autonomy.cjs');
 const gates = require('../bin/lib/gates.cjs');
 const gh = require('../bin/lib/gh.cjs');
@@ -524,6 +528,9 @@ function resolveEffectiveAgent(policy) {
     acknowledged_enforcement_gaps: [],
     containment_tier: 1,
     reconcile_work_items: false,
+    // Stage 96 (ADR-0033): default-OFF like the reconcile; only an explicit
+    // true (base or per-role) reaches agent-exec as --commit-intent-artifacts.
+    commit_intent_artifacts: false,
     ...agentBase,
   });
   // Snapshot each role's fully-merged config, frozen, at resolution time. A
@@ -551,22 +558,52 @@ function resolveEffectiveAgent(policy) {
 // checked first (so a policy with NO roles map throws the byte-identical error
 // it always did), then every role whose RESOLVED provider is codex. `resolved`
 // is the resolveEffectiveAgent resolver: `.base` + `agentForRole`.
+// Stage 94 (ADR-0031): the gate is no longer a codex denylist. It resolves the
+// provider's TRUST-TABLE entry FIRST — no entry ⇒ the run is refused before any
+// tier arithmetic (`untiered-provider`), because "not codex" used to mean "the
+// claude reference tier", i.e. maximum trust granted by omission. With an entry,
+// the gate reads `required_containment_tier` instead of the provider id; codex's
+// entry carries 2, so the two message bodies below render byte-identically to
+// what they have always said (they are quoted in operator docs).
 function assertContainmentTier(policy, resolved) {
   if (policy.mode !== 'autonomous') {
     return;
   }
   const base = resolved.base;
-  if (base.provider === 'codex' && base.containment_tier !== 2) {
+  const baseEntry = tiers.getTier(base.provider);
+  if (baseEntry === null) {
     throw new WorkerError(
-      `fail-closed: mode 'autonomous' with agent.provider codex requires ADR-0011 tier-2 containment (a disposable shaped workspace + gated merge-back), but agent.containment_tier is ${JSON.stringify(base.containment_tier)} — unattended codex autonomy is REFUSED at tier 1, which catches a protected-path write only after it happened. Set agent.containment_tier: 2 in .verity/autonomy.yml, or run in mode 'supervised'`,
+      tiers.untieredProviderMessage(base.provider, "mode 'autonomous' (agent.provider)"),
+      'untiered-provider',
+    );
+  }
+  if (
+    baseEntry.required_containment_tier !== null &&
+    base.containment_tier !== baseEntry.required_containment_tier
+  ) {
+    throw new WorkerError(
+      `fail-closed: mode 'autonomous' with agent.provider ${base.provider} requires ADR-0011 tier-${baseEntry.required_containment_tier} containment (a disposable shaped workspace + gated merge-back), but agent.containment_tier is ${JSON.stringify(base.containment_tier)} — unattended ${base.provider} autonomy is REFUSED at tier 1, which catches a protected-path write only after it happened. Set agent.containment_tier: ${baseEntry.required_containment_tier} in .verity/autonomy.yml, or run in mode 'supervised'`,
       'containment-tier-required',
     );
   }
   for (const role of autonomy.KNOWN_AGENT_ROLES) {
     const cfg = resolved.agentForRole(role);
-    if (cfg.provider === 'codex' && cfg.containment_tier !== 2) {
+    const entry = tiers.getTier(cfg.provider);
+    if (entry === null) {
       throw new WorkerError(
-        `fail-closed: mode 'autonomous' with a per-role agent.provider codex (role '${role}') requires ADR-0011 tier-2 containment (a disposable shaped workspace + gated merge-back), but this role resolves to agent.containment_tier ${JSON.stringify(cfg.containment_tier)} — a per-role codex override can NEVER bypass tier-2. Set agent.roles.${role}.containment_tier: 2 (or agent.containment_tier: 2) in .verity/autonomy.yml, or run in mode 'supervised'`,
+        tiers.untieredProviderMessage(
+          cfg.provider,
+          `mode 'autonomous' (per-role agent.roles.${role}.provider)`,
+        ),
+        'untiered-provider',
+      );
+    }
+    if (
+      entry.required_containment_tier !== null &&
+      cfg.containment_tier !== entry.required_containment_tier
+    ) {
+      throw new WorkerError(
+        `fail-closed: mode 'autonomous' with a per-role agent.provider ${cfg.provider} (role '${role}') requires ADR-0011 tier-${entry.required_containment_tier} containment (a disposable shaped workspace + gated merge-back), but this role resolves to agent.containment_tier ${JSON.stringify(cfg.containment_tier)} — a per-role ${cfg.provider} override can NEVER bypass tier-${entry.required_containment_tier}. Set agent.roles.${role}.containment_tier: ${entry.required_containment_tier} (or agent.containment_tier: ${entry.required_containment_tier}) in .verity/autonomy.yml, or run in mode 'supervised'`,
         'containment-tier-required',
       );
     }
@@ -1248,9 +1285,15 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
   // codex (the base, or a per-role override). Attaching them stays PER ROLE at
   // dispatch (only a codex role's invocation gets --state-snapshot). With no
   // roles map this reduces to `base.provider === 'codex'` — byte-identical.
+  // Stage 94 (ADR-0031): the question is asked of the TRUST TABLE, not of the
+  // provider id — "does this runtime perform its own GitHub reads?". codex's
+  // entry says no and claude's says yes, so this is byte-identical today; an
+  // un-tiered provider (no entry) requests nothing here and is refused outright
+  // at the dispatch gate below.
+  const needsAttachedFacts = (p) => tiers.getTier(p)?.performs_own_github_reads === false;
   const requestFacts =
-    agentCfg.provider === 'codex' ||
-    autonomy.KNOWN_AGENT_ROLES.some((r) => agentForRole(r).provider === 'codex');
+    needsAttachedFacts(agentCfg.provider) ||
+    autonomy.KNOWN_AGENT_ROLES.some((r) => needsAttachedFacts(agentForRole(r).provider));
 
   // No-progress strike state. The cross-tick count is read ONCE, from the
   // item's run-summary trail, on the run's first dispatch decision (it cannot
@@ -1495,6 +1538,13 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
       if (roleCfg.reconcile_work_items === true) {
         dispatchFlags['reconcile-work-items'] = true;
       }
+      // Stage 96 (ADR-0033, #189): the file-side sibling — the engine commits a
+      // git_write:false role's intent artifacts after it returns. Omitted-in the
+      // same way: only an explicit true travels, so every pre-stage-96 policy
+      // dispatches byte-identically. agent-exec gates the flag to the tabled roles.
+      if (roleCfg.commit_intent_artifacts === true) {
+        dispatchFlags['commit-intent-artifacts'] = true;
+      }
       // Stage 81 (ADR-0029): the resolved delivery substrate, omitted-in like
       // every other knob — only 'local' travels (github/absent dispatches carry
       // no flag, byte-identical), and agent-exec then narrows the role's
@@ -1510,9 +1560,20 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
       // synthesized without consulting the dependency engine, so it carries
       // none). A claude role never gets the flag even if a decision carried
       // facts — provider-checked, so the claude path stays byte-identical.
-      if (roleCfg.provider === 'codex' && plan.facts !== undefined) {
+      // Stage 94 (ADR-0031): table-checked rather than id-checked — the flag
+      // rides only for a runtime whose entry says it does NOT perform its own
+      // GitHub reads (codex today; byte-identical).
+      if (needsAttachedFacts(roleCfg.provider) && plan.facts !== undefined) {
         dispatchFlags['state-snapshot'] = plan.facts;
       }
+      // Stage 94 (ADR-0031): the WORKER-ORIGIN marker. agent-exec cannot tell a
+      // human's explicit `--agent <id>` from an unattended worker dispatch, and
+      // the two have different trust bars: the registry makes a driver usable
+      // interactively, the TABLE is what clears it for unattended selection. So
+      // the discriminator is mechanical and explicit — this flag, which the
+      // worker always passes and a human never does. Its ABSENCE is exactly
+      // today's behavior (an interactive run is unaffected).
+      dispatchFlags['worker-dispatch'] = true;
       res = agentExec.dispatch([plan.role, ...plan.args], dispatchFlags);
       // Stage 32 — the consumption point for a FRESH dispatch, and the
       // pre-work-vs-mid-work discriminator. A dispatch that spawned a model
@@ -1745,9 +1806,27 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
       const ghOpts =
         ctx.substrate === 'local' ? { cwd: ctx.cwd, substrate: 'local' } : { cwd: ctx.cwd };
       const trustLevel = policy.review.trust;
+      // Stage 94 (ADR-0031): the ladder is now PROVENANCE-aware. Until this
+      // stage nothing in this path asked WHICH RUNTIME produced the verdict —
+      // `res.artifacts.verdict` was a self-reported string from whatever
+      // provider had just run, and it reached a real `trust.merge`. Merge
+      // authority is now a trust-table property of the provider that produced
+      // the verdict (the RESOLVED provider for the `review` role, not the base):
+      // a runtime without it GATES, exactly as an absent/unknown verdict does
+      // today — it never silently merges and never loops back into review.
+      // claude and codex both carry `merge_authority: true`, so no current run
+      // changes.
+      const reviewEntry = tiers.getTier(roleCfg.provider);
+      const hasMergeAuthority = reviewEntry !== null && reviewEntry.merge_authority === true;
 
       let decision;
-      if (verdict !== 'approve') {
+      if (!hasMergeAuthority) {
+        decision = {
+          merge: false,
+          gate: true,
+          reason: `the review verdict came from provider '${roleCfg.provider}', which has no merge authority in the engine's provider trust table (ADR-0031) — a verdict from a runtime not cleared to merge never reaches trust.merge; gating for a human`,
+        };
+      } else if (verdict !== 'approve') {
         // Fail closed: a review success without an explicit approve verdict
         // gates — it never merges, and never loops back into review.
         decision = trust.decideMerge(verdict, trustLevel, null, null);

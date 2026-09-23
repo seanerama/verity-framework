@@ -341,6 +341,7 @@ test('GUARD: fetchSnapshot(target) shells out ONLY into the target — issues, P
 const TARGET_VIEW = {
   online: true,
   release: null,
+  release_source: 'tag',
   stages: [
     {
       number: 1,

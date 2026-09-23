@@ -7,19 +7,25 @@ const os = require('node:os');
 const path = require('node:path');
 
 const agentExec = require('../verity/bin/lib/agent-exec.cjs');
+const codex = require('../verity/bin/lib/agents/codex.cjs');
 const install = require('../verity/bin/lib/install.cjs');
 
 const CLI = path.join(__dirname, '..', 'verity', 'bin', 'verity.cjs');
 const ROLES_DIR = path.join(__dirname, '..', 'commands', 'verity');
 const FIXTURES = path.join(__dirname, 'fixtures', 'render');
-const RUNTIME_PREAMBLE = fs
-  .readFileSync(
-    path.join(__dirname, '..', 'verity', 'templates', 'preamble-runtime.md.tmpl'),
-    'utf8',
-  )
-  .trimEnd();
-// The tell-tale of a hand-pasted runtime-fallback line (build.md's unrelated
-// "Runtime fallback: … implement inline" line must NOT match, so key on the path).
+const TEMPLATES = path.join(__dirname, '..', 'verity', 'templates');
+const tmpl = (name) => fs.readFileSync(path.join(TEMPLATES, name), 'utf8').trimEnd();
+const RUNTIME_PREAMBLE = tmpl('preamble-runtime.md.tmpl');
+const DELEGATION_PREAMBLE = tmpl('preamble-delegation.md.tmpl');
+// Every unconditional block, in table order — the exact text renderRole() must
+// prepend. Derived from install.PREAMBLES so adding a block does not require
+// touching each assertion (only the golden fixtures, deliberately).
+const ALL_PREAMBLES = install.PREAMBLES.filter((b) => b.option === null)
+  .map((b) => tmpl(b.template))
+  .join('\n\n');
+// The tell-tale of a hand-pasted runtime-fallback line: the ENGINE PATH itself,
+// never the words "Runtime fallback". Keying on the path is what keeps prose
+// anywhere else in a role body from tripping this guard.
 const FALLBACK_PATH = '$HOME/.claude/verity/bin/verity.cjs';
 
 function roleFiles() {
@@ -121,16 +127,83 @@ test('no role source file contains the runtime-fallback line', () => {
 });
 
 // Diff test: for every role, the new claude output == old copy behavior modulo
-// the extracted preamble — i.e. exactly frontmatter + preamble + untouched body.
-test('every role rendered for claude == source + extracted preamble, exactly once', () => {
+// the extracted preambles — i.e. exactly frontmatter + preambles + untouched body.
+test('every role rendered for claude == source + extracted preambles, exactly once', () => {
   for (const name of roleFiles()) {
     const file = path.join(ROLES_DIR, name);
     const source = fs.readFileSync(file, 'utf8');
     const m = source.match(/^(---\r?\n[\s\S]*?\r?\n---\r?\n)([\s\S]*)$/);
     assert(m, `${name} has frontmatter`);
     const rendered = install.renderRole(file, {}, 'claude');
-    assertEqual(rendered, `${m[1]}${RUNTIME_PREAMBLE}\n\n${m[2]}`, `${name} claude render`);
-    assertEqual(count(rendered, RUNTIME_PREAMBLE), 1, `${name} renders the preamble exactly once`);
+    assertEqual(rendered, `${m[1]}${ALL_PREAMBLES}\n\n${m[2]}`, `${name} claude render`);
+    for (const block of [RUNTIME_PREAMBLE, DELEGATION_PREAMBLE]) {
+      assertEqual(count(rendered, block), 1, `${name} renders each preamble exactly once`);
+    }
+  }
+});
+
+// --- context discipline (stage 92): the delegation rule reaches EVERY role ---
+//
+// The defect: only `build` carried any delegation language, so the other 14
+// roles ran all of their work in the main loop — one real /verity:architect
+// session scaffolded a whole repo inline over 346 turns with zero sub-agent
+// calls. These three tests are the bug contract: the block cannot go missing,
+// build's escape hatch cannot come back, and architect cannot re-claim the build.
+
+test('every role carries the delegation preamble (the fix for main-loop context bloat)', () => {
+  for (const name of roleFiles()) {
+    const rendered = install.renderRole(path.join(ROLES_DIR, name), {}, 'claude');
+    assert(
+      rendered.includes('<context-discipline>'),
+      `${name} must carry the shared context-discipline block`,
+    );
+    assertEqual(count(rendered, '<context-discipline>'), 1, `${name}: exactly one block`);
+  }
+});
+
+// build.md is the one role that delegates the whole implementation; its old
+// "if the harness has no sub-agent/Task support, implement inline" line was a
+// judgment-call escape hatch and must not come back.
+test('build.md does not offer inline implementation as a fallback', () => {
+  const build = fs.readFileSync(path.join(ROLES_DIR, 'build.md'), 'utf8');
+  assert(build.includes('Task tool'), 'build still delegates via the Task tool');
+  assert(
+    !/no sub-agent\/Task support, implement inline/.test(build),
+    'the optional-delegation escape hatch is gone',
+  );
+  assert(
+    build.includes('This delegation is not optional.'),
+    'and is replaced by the narrow tool-denial rule',
+  );
+});
+
+// The Architect designs; it never builds. Guards the contradiction that let it
+// scaffold a whole repo inline (46 writes / 38 edits in one main-loop session).
+test('architect.md declares implementation a non-goal and never claims to own the skeleton', () => {
+  const architect = fs.readFileSync(path.join(ROLES_DIR, 'architect.md'), 'utf8');
+  assert(architect.includes('<non-goals>'), 'architect declares non-goals');
+  assert(
+    !/own the walking skeleton/.test(architect),
+    '"own the walking skeleton" invited building it — must say define',
+  );
+  assert(
+    architect.includes('`stage-instructions/` belongs to'),
+    'architect names stage-instructions/ as another role’s artifact',
+  );
+});
+
+// The public specs must not describe the escape hatch this stage removed: the
+// runtime capability probe stays, the judgment call goes (both files are O2).
+test('the public specs describe delegation as non-optional, not a judgment call', () => {
+  const DOCS = path.join(__dirname, '..', 'docs');
+  for (const name of ['roles-spec.md', 'framework-spec.md']) {
+    const text = fs.readFileSync(path.join(DOCS, name), 'utf8');
+    assert(text.includes('probe'), `${name}: the capability probe is still specified`);
+    assert(/delegation is not optional/i.test(text), `${name}: delegation is stated as mandatory`);
+    assert(
+      !/yes → delegate; no → inline/.test(text),
+      `${name}: the "no → inline" judgment call is gone`,
+    );
   }
 });
 
@@ -229,8 +302,10 @@ test('renderPrompt contains the same preamble as installed files (headless parit
   install.installClaude({ target, home });
   const installed = fs.readFileSync(path.join(target, 'commands', 'verity', 'vision.md'), 'utf8');
   assert(installed.includes(RUNTIME_PREAMBLE), 'installed file carries the preamble');
+  assert(installed.includes(DELEGATION_PREAMBLE), 'installed file carries the delegation block');
   const prompt = agentExec.renderPrompt(path.join(ROLES_DIR, 'vision.md'), []);
   assertEqual(count(prompt, RUNTIME_PREAMBLE), 1, 'headless prompt carries the same preamble once');
+  assertEqual(count(prompt, DELEGATION_PREAMBLE), 1, 'and the delegation block exactly once');
   assert(
     prompt.includes('<headless-result-contract>'),
     'RESULT_CONTRACT still appended (headless-only)',
@@ -242,6 +317,34 @@ test('renderPrompt on an already-installed copy does not double the preamble', (
   install.installClaude({ target, home });
   const prompt = agentExec.renderPrompt(path.join(target, 'commands', 'verity', 'vision.md'), []);
   assertEqual(count(prompt, RUNTIME_PREAMBLE), 1, 'installed input → still exactly one preamble');
+  assertEqual(count(prompt, DELEGATION_PREAMBLE), 1, 'the new block is de-duped by the same guard');
+});
+
+// The codex pass rewrites /verity:<role> → $verity-<role>, so the block's
+// ownership references change SHAPE for codex. That is desired, not a defect —
+// assert the rewritten form in the INSTALLED (SKILL.md) render…
+test('the codex render carries the delegation block once, with $verity-<role> rewritten', () => {
+  const rendered = install.renderRole(path.join(ROLES_DIR, 'vision.md'), {}, 'codex');
+  const rewritten = DELEGATION_PREAMBLE.replace(/\/verity:([a-z][a-z0-9-]*)/g, '$$verity-$1');
+  assertEqual(count(rendered, rewritten), 1, 'codex render carries the rewritten block once');
+  assert(!rendered.includes('/verity:plan'), 'no Claude-host invocation survives in the block');
+  for (const ref of ['$verity-plan', '$verity-architect', '$verity-ship']) {
+    assert(rendered.includes(ref), `${ref} ownership reference present in the codex form`);
+  }
+});
+
+// …and the NEUTRALIZED form in the headless prompt. Issue #170: `$verity-<role>`
+// is a live explicit-invocation token in a `codex exec` prompt, so the headless
+// render turns every one into inert prose. The new block introduces three such
+// references, and they must go the same way — a preamble that told a headless
+// codex role to hand off would auto-invoke a sibling role instead of running.
+test('codex.renderPrompt neutralizes the delegation block handoff tokens (issue #170)', () => {
+  const prompt = codex.renderPrompt(path.join(ROLES_DIR, 'vision.md'), []);
+  assertEqual(count(prompt, '<context-discipline>'), 1, 'the block is present exactly once');
+  assert(!/\$verity-[a-z]/.test(prompt), 'no live $verity-<role> token survives headlessly');
+  for (const ref of ['the verity:plan role', 'the verity:architect role', 'the verity:ship role']) {
+    assert(prompt.includes(ref), `${ref} — ownership reference kept as inert prose`);
+  }
 });
 
 // --- idempotency: same options twice → byte-identical files + recorded options ---

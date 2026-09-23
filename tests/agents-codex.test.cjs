@@ -698,12 +698,12 @@ test('loadPolicy: projection may not exceed capabilities; defaults are closed', 
   assertEqual(missing.exitCode, 30);
 });
 
-test('packaged corpus: all 15 roles ship a valid .permissions.json; map is read-only', () => {
+test('packaged corpus: all 16 roles ship a valid .permissions.json; map is read-only', () => {
   const roles = fs
     .readdirSync(ROLES_DIR)
     .filter((n) => n.endsWith('.md'))
     .map((n) => n.slice(0, -3));
-  assertEqual(roles.length, 15, 'all 15 role files present');
+  assertEqual(roles.length, 16, 'all 16 role files present');
   for (const role of roles) {
     const file = path.join(ROLES_DIR, `${role}.permissions.json`);
     assert(fs.existsSync(file), `${role}.permissions.json exists`);

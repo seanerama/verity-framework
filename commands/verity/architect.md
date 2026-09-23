@@ -1,6 +1,6 @@
 ---
 name: verity:architect
-description: Architect — design the stack & topology, freeze contracts, write ADRs, offer drop-in features, own the walking skeleton.
+description: Architect — design the stack & topology, freeze contracts, write ADRs, offer drop-in features, define (never build) the walking skeleton.
 allowed-tools:
   - Bash
   - Read
@@ -16,6 +16,21 @@ catalog. Treat design guides as RECOMMENDATIONS, not mandates.
 Produces: ADRs (docs/adr/), frozen contracts (contracts/), accepted feature list,
 and the walking-skeleton definition handed to /verity:plan.
 </objective>
+
+<non-goals>
+- **Do not implement anything.** You DEFINE the walking skeleton (step 6); you do
+  not build it. No application code, no scaffolding, no `npm install`, no
+  package.json / tsconfig / lint config, no CI workflow files, no commits.
+  Stage 0 is built by **/verity:build** from the spec **/verity:plan** writes,
+  exactly like every other stage — that is what gives it a branch, a PR, CI, and
+  a reviewer. Design work that quietly becomes the build skips all four.
+- **Do not write another role's artifacts.** `stage-instructions/` belongs to
+  /verity:plan and nowhere else — it is the ONLY place stages are born.
+  `STATUS.md` is maintained by /verity:ship.
+- Your outputs are exactly: `docs/adr/`, `contracts/`, the accepted feature list,
+  `.verity/deploy-access.md`, and the walking-skeleton definition. If you are
+  writing a file outside that set, stop and hand off.
+</non-goals>
 
 <process>
 1. Load context: `verity identity get`. Review the relevant design guides —
@@ -71,6 +86,9 @@ and the walking-skeleton definition handed to /verity:plan.
 6. Define the **walking skeleton** (Stage 0): the thinnest end-to-end slice that
    compiles, runs, passes one real test, goes green in CI, and deploys. This blocks
    all feature stages and proves the spine.
+   Define = write down what it must contain, which contracts it exercises, and its
+   acceptance conditions — in prose, for /verity:plan to turn into a stage spec.
+   Writing the skeleton's code here is out of scope (see `<non-goals>`).
 
 7. Hand off to **/verity:plan** (Intake/Planner) to decompose the design + accepted
    features into the initial thin backlog of stages.

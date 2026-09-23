@@ -30,6 +30,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const adr = require('./adr.cjs');
+// Stage 94 (ADR-0031): the engine-owned provider TRUST table. The `agent.provider`
+// enum below is SOURCED from it (so the enum can never diverge from the table),
+// and every codex-only cross-field rule now reads a table PROPERTY instead of a
+// provider id. Deliberately a top-level require: tiers.cjs pulls in only the
+// result-contract error class, so this module's zero-heavy-import load path is
+// unchanged.
+const tiers = require('./agents/tiers.cjs');
 
 class PolicyError extends Error {
   constructor(message, opts = {}) {
@@ -414,7 +421,13 @@ const SPEC = {
   agent: {
     type: 'map',
     keys: {
-      provider: { type: 'enum', values: ['claude', 'codex'] },
+      // Stage 94 (ADR-0031): still an enum, but its values are SOURCED from the
+      // provider trust table — the enum stops being the thing that holds the
+      // line (it was, by accident: "containment by enum"), and can never
+      // diverge from the table. Widening it is no longer a way to grant trust;
+      // only a table entry is. schemas/autonomy.schema.json mirrors this list
+      // and a test binds the two together.
+      provider: { type: 'enum', values: tiers.workerSelectableProviders() },
       model: { type: 'stringOrNull' },
       sandbox: { type: 'enumOrNull', values: ['read-only', 'workspace-write'] },
       approval: { type: 'enumOrNull', values: ['untrusted', 'on-request', 'never'] },
@@ -450,6 +463,20 @@ const SPEC = {
       // translates this into agent-exec's `--reconcile-work-items` flag; the
       // plan.md agent step stays as the flag-OFF backstop until this defaults ON.
       reconcile_work_items: { type: 'boolean' },
+      // Stage 96 (ADR-0033, #189) — ADDITIVE and DEFAULT-ABSENT: the file-side
+      // sibling of reconcile_work_items. When true, the ENGINE commits the
+      // intent artifacts a git_write:false role wrote (plan's
+      // stage-instructions/ contracts/ feature-assessments/ docs/adr/, revisit's
+      // docs/revisit/) to the checkout's branch and pushes them to the
+      // substrate's origin after the role returns — additively by pathspec,
+      // idempotently, non-fatally. Nothing committed those files before: the
+      // ADR-0012 lifecycle engages only for a git_write grant, so the specs
+      // stayed dirty and unpushed (#189). Absent/false is the closed state —
+      // byte-identical to today (no `intent_artifacts` result field).
+      // Provider- and substrate-NEUTRAL like the reconcile: no cross-field
+      // provider restriction. The worker translates it into agent-exec's
+      // `--commit-intent-artifacts` flag; per-role override allowed (roles).
+      commit_intent_artifacts: { type: 'boolean' },
       // Stage 54 (ADR-0024) — ADDITIVE and DEFAULT-ABSENT: an optional per-role
       // override map. Keys are the roles the worker dispatches (build|plan|review,
       // KNOWN_AGENT_ROLES); values are PARTIAL agent configs (provider/model +
@@ -533,6 +560,9 @@ const ROLE_OVERRIDE_KEYS = [
   'approval',
   'acknowledged_enforcement_gaps',
   'containment_tier',
+  // Stage 96 (ADR-0033): per-role override of the intent-artifacts commit
+  // (e.g. ON for plan only), validated with the SAME boolean spec as the base.
+  'commit_intent_artifacts',
 ];
 const ROLE_OVERRIDE_SPEC = Object.fromEntries(
   ROLE_OVERRIDE_KEYS.map((k) => [k, SPEC.agent.keys[k]]),
@@ -654,6 +684,15 @@ function walkRoleMap(value, prefix, errors) {
   }
 }
 
+// Stage 94 (ADR-0031): the providers for which the ADR-0011 containment-tier
+// concept applies at all, rendered from the trust table so the knob-rejection
+// wording can never contradict the policy. Today: `codex`.
+function tieredProviders() {
+  return Object.keys(tiers.TRUST_TABLE)
+    .filter((p) => tiers.getTier(p).required_containment_tier !== null)
+    .join('|');
+}
+
 // Validate a (merged) policy object against the §2 schema. Returns error strings.
 function validatePolicy(policy) {
   const errors = [];
@@ -661,33 +700,61 @@ function validatePolicy(policy) {
   // Stage 9 cross-field rule: sandbox/approval are codex projection overrides
   // with no Claude meaning. A config the operator believes exists but doesn't
   // is the ADR-0008 failure mode — rejected, never silently ignored.
+  // Stage 94 (ADR-0031): the same rules, but each knob is gated on the trust
+  // table PROPERTY that gives it meaning rather than on the provider id —
+  // sandbox/approval on `consumes_capability_policy`,
+  // acknowledged_enforcement_gaps on `harness_enforced`, containment_tier on
+  // `required_containment_tier !== null`. Every message names the providers the
+  // knob DOES apply to by asking the table, so today's wording ("only
+  // meaningful with agent.provider codex") is byte-identical and cannot drift
+  // from the policy later. A provider with NO table entry gets its own,
+  // distinct `untiered-provider` error instead of falling into the codex
+  // wording: an operator who reads "only meaningful with codex" adds a
+  // provider line, and an operator who reads "has not been vetted" reads the ADR.
   const agent = policy.agent;
-  if (isPlainObject(agent) && agent.provider !== 'codex') {
-    for (const knob of ['sandbox', 'approval']) {
-      if (agent[knob] !== undefined && agent[knob] !== null) {
+  if (isPlainObject(agent)) {
+    const providerId = agent.provider === undefined ? 'claude' : agent.provider;
+    const entry = tiers.getTier(providerId);
+    if (entry === null) {
+      errors.push(
+        `agent.provider: ${tiers.untieredProviderMessage(providerId, 'worker selection and mode autonomous')}`,
+      );
+    } else {
+      if (entry.consumes_capability_policy !== true) {
+        const supported = tiers.providersWith('consumes_capability_policy').join('|');
+        for (const knob of ['sandbox', 'approval']) {
+          if (agent[knob] !== undefined && agent[knob] !== null) {
+            errors.push(
+              `agent.${knob}: only meaningful with agent.provider ${supported} — set the provider first or remove the override`,
+            );
+          }
+        }
+      }
+      // Same rule for the stage-11 acknowledgement knob: a harness-enforced
+      // runtime's restrictions are enforced by its own harness allowlist, so it
+      // has no gap to acknowledge and a non-empty list would be a config the
+      // operator believes does something. An empty list is the default-absent state.
+      if (
+        entry.harness_enforced !== false &&
+        Array.isArray(agent.acknowledged_enforcement_gaps) &&
+        agent.acknowledged_enforcement_gaps.length > 0
+      ) {
         errors.push(
-          `agent.${knob}: only meaningful with agent.provider codex — set the provider first or remove the override`,
+          `agent.acknowledged_enforcement_gaps: only meaningful with agent.provider ${tiers.providersWith('harness_enforced', false).join('|')} — ${providerId} restrictions are enforced by its own harness allowlist (ADR-0011)`,
         );
       }
-    }
-    // Same rule for the stage-11 acknowledgement knob: claude's restrictions
-    // are enforced by its own harness allowlist, so it has no gap to
-    // acknowledge and a non-empty list would be a config the operator
-    // believes does something. An empty list is the default-absent state.
-    if (
-      Array.isArray(agent.acknowledged_enforcement_gaps) &&
-      agent.acknowledged_enforcement_gaps.length > 0
-    ) {
-      errors.push(
-        'agent.acknowledged_enforcement_gaps: only meaningful with agent.provider codex — claude restrictions are enforced by its own harness allowlist (ADR-0011)',
-      );
-    }
-    // Same rule for the tier knob (stage 14): claude has no containment tiers,
-    // so any value here would be a config the operator believes did something.
-    if (agent.containment_tier !== undefined && agent.containment_tier !== null) {
-      errors.push(
-        'agent.containment_tier: only meaningful with agent.provider codex — claude has no ADR-0011 containment tiers (its write-time restriction is enforced by its own harness allowlist)',
-      );
+      // Same rule for the tier knob (stage 14): a runtime whose table entry has
+      // no required containment tier has no tiers at all, so any value here
+      // would be a config the operator believes did something.
+      if (
+        entry.required_containment_tier === null &&
+        agent.containment_tier !== undefined &&
+        agent.containment_tier !== null
+      ) {
+        errors.push(
+          `agent.containment_tier: only meaningful with agent.provider ${tieredProviders()} — ${providerId} has no ADR-0011 containment tiers (its write-time restriction is enforced by its own harness allowlist)`,
+        );
+      }
     }
   }
   // Stage 54 (ADR-0024): the SAME cross-field rules, applied PER ROLE against
@@ -739,27 +806,44 @@ function validateAgentRoleCrossFields(agent, errors) {
     }
     const provider = cfg.provider === undefined ? baseProvider : cfg.provider;
     const at = `agent.roles.${role}`;
-    if (provider !== 'codex') {
+    // Stage 94 (ADR-0031): per-role knobs are gated on the SAME trust-table
+    // properties as the base block, and an un-tiered per-role provider gets the
+    // same distinct refusal — a role override must never be the back door a
+    // base-block refusal closes.
+    const entry = tiers.getTier(provider);
+    if (entry === null) {
+      errors.push(
+        `${at}.provider: ${tiers.untieredProviderMessage(provider, `worker dispatch of role '${role}'`)}`,
+      );
+      continue;
+    }
+    if (entry.consumes_capability_policy !== true) {
+      const supported = tiers.providersWith('consumes_capability_policy').join('|');
       for (const knob of ['sandbox', 'approval']) {
         if (cfg[knob] !== undefined && cfg[knob] !== null) {
           errors.push(
-            `${at}.${knob}: only meaningful with codex — this role resolves to provider ${provider} (set ${at}.provider: codex or remove the override)`,
+            `${at}.${knob}: only meaningful with ${supported} — this role resolves to provider ${provider} (set ${at}.provider: ${supported} or remove the override)`,
           );
         }
       }
-      if (
-        Array.isArray(cfg.acknowledged_enforcement_gaps) &&
-        cfg.acknowledged_enforcement_gaps.length > 0
-      ) {
-        errors.push(
-          `${at}.acknowledged_enforcement_gaps: only meaningful with codex — this role resolves to provider ${provider} (ADR-0011)`,
-        );
-      }
-      if (cfg.containment_tier !== undefined && cfg.containment_tier !== null) {
-        errors.push(
-          `${at}.containment_tier: only meaningful with codex — this role resolves to provider ${provider} (ADR-0011)`,
-        );
-      }
+    }
+    if (
+      entry.harness_enforced !== false &&
+      Array.isArray(cfg.acknowledged_enforcement_gaps) &&
+      cfg.acknowledged_enforcement_gaps.length > 0
+    ) {
+      errors.push(
+        `${at}.acknowledged_enforcement_gaps: only meaningful with ${tiers.providersWith('harness_enforced', false).join('|')} — this role resolves to provider ${provider} (ADR-0011)`,
+      );
+    }
+    if (
+      entry.required_containment_tier === null &&
+      cfg.containment_tier !== undefined &&
+      cfg.containment_tier !== null
+    ) {
+      errors.push(
+        `${at}.containment_tier: only meaningful with ${tieredProviders()} — this role resolves to provider ${provider} (ADR-0011)`,
+      );
     }
     if (
       typeof cfg.sandbox === 'string' &&
@@ -1045,9 +1129,17 @@ const WORKER_DISPATCH_ROLES = KNOWN_AGENT_ROLES;
 // in validatePolicy's format.
 function enforcementGapErrors(cwd, policy) {
   const agent = policy.agent;
-  if (!isPlainObject(agent) || agent.provider !== 'codex') {
-    return []; // claude restrictions are enforced by its own harness allowlist
+  // Stage 94 (ADR-0031): the check applies to a runtime whose restrictions are
+  // NOT enforced by its own harness — a table property, not a provider id. A
+  // harness-enforced runtime (claude) has no gap to report, and an un-tiered
+  // provider was already refused outright by validatePolicy, so both return [].
+  const entry = isPlainObject(agent)
+    ? tiers.getTier(agent.provider === undefined ? 'claude' : agent.provider)
+    : null;
+  if (entry === null || entry.harness_enforced !== false) {
+    return []; // harness-enforced restrictions have no gap to acknowledge
   }
+  const providerId = agent.provider === undefined ? 'claude' : agent.provider;
   const acknowledged = Array.isArray(agent.acknowledged_enforcement_gaps)
     ? agent.acknowledged_enforcement_gaps
     : [];
@@ -1081,7 +1173,7 @@ function enforcementGapErrors(cwd, policy) {
   }
   return [...byGap.keys()].sort().map((gap) => {
     const roles = byGap.get(gap).sort().join(', ');
-    return `agent.acknowledged_enforcement_gaps: role(s) ${roles} declare ${gap}: false, which NO mechanism enforces on codex — the worker would refuse every such dispatch (exit 30 unenforceable-policy) rather than appear to enforce it (ADR-0011); acknowledge the gap explicitly with agent.acknowledged_enforcement_gaps: [${gap}] to run anyway, with the gap recorded in each run's result`;
+    return `agent.acknowledged_enforcement_gaps: role(s) ${roles} declare ${gap}: false, which NO mechanism enforces on ${providerId} — the worker would refuse every such dispatch (exit 30 unenforceable-policy) rather than appear to enforce it (ADR-0011); acknowledge the gap explicitly with agent.acknowledged_enforcement_gaps: [${gap}] to run anyway, with the gap recorded in each run's result`;
   });
 }
 
@@ -1117,6 +1209,10 @@ function dispatch(args, flags) {
 }
 
 module.exports = {
+  // Stage 94 (ADR-0031): the resolved `agent.provider` enum, exported so the
+  // no-drift gate can assert enum == JSON schema == workerSelectableProviders()
+  // in one place instead of re-deriving the list a fourth time.
+  AGENT_PROVIDER_VALUES: SPEC.agent.keys.provider.values,
   DEFAULTS,
   FORCED_GATES,
   FORCED_PROTECTED_PATHS,

@@ -17,7 +17,7 @@ Continuous CD to STAGING on every merge; PROD is a deliberate cut release.
 <process>
 1. **Decide the release.** Review what's merged since the last tag:
    ```bash
-   verity release current      # latest tag / version
+   verity release current      # current release truth
    verity release changelog    # preview the Conventional-Commits changelog
    ```
 
@@ -50,15 +50,30 @@ Continuous CD to STAGING on every merge; PROD is a deliberate cut release.
 6. **Promote to PROD** — human confirm-gate by default (`verity config get prod_promote`;
    set `auto` to skip). Same byte-identical digests. Flip any kill-switch dark→enabled
    as a deliberate, separate step.
+   On the promotion path, the prod tag `verity promotion finalize` pushes is what
+   **triggers** the prod publish workflow — it then waits on the `npm-publish`
+   environment approval, which is yours to give (finalize prints the URL and the
+   shasum to verify against; it never observes the run).
 
 7. **Record runtime truth** (this role owns STATUS.md):
+   On the **promotion path**, `verity promotion finalize` now stamps `version`,
+   `deployed_at` and `rollback_from` into `.verity/runtime.json`, re-renders
+   `STATUS.md`, and commits both with the completed PROM record — so those three
+   fields need NO manual step (the stamp fails soft: if it warns that the surface
+   was not stamped, run `verity status set version <version>` by hand). What is
+   still yours either way is the deployment topology — environments and secret
+   locations:
    ```bash
-   verity status set version <version>
    verity status set environments.prod.digest <sha256>
-   verity status set rollback_from <previous-digest-or-backup>
    verity status secret "<NAME> @ <on-disk location>"   # locations only, never values
    ```
-   `STATUS.md` is regenerated from `.verity/runtime.json`.
+   On the **direct `release cut` path** (no promotion), nothing is stamped for you
+   — set the version fields yourself:
+   ```bash
+   verity status set version <version>
+   verity status set rollback_from <previous-digest-or-backup>
+   ```
+   `STATUS.md` is regenerated from `.verity/runtime.json` — never hand-write it.
 
 8. **On failure → rollback:** re-pin the previous digests + re-run `deploy.sh` (safe
    because migrations are additive-only); note it in STATUS.md.

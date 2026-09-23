@@ -14,6 +14,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const promotion = require('../verity/bin/lib/promotion.cjs');
+const status = require('../verity/bin/lib/status.cjs');
 const { findBare } = require('../verity/bin/lib/changelog-sanitize.cjs');
 
 const REPO_ROOT = path.join(__dirname, '..');
@@ -134,10 +135,35 @@ function promRecordText({
   ].join('\n');
 }
 
+// Stage 91 fixture surface: the dev repo carries a package.json (the
+// rollback_from string reuses its name — no hardcoded "verity-framework"), a
+// STALE .verity/runtime.json, and the STATUS.md rendered from it. That stale
+// pair IS the drift this stage closes: without the stamp, finalize leaves the
+// release surface naming the OLD version.
+const DEV_PKG_NAME = 'widget-dev';
+const STALE_RUNTIME = {
+  version: '1.1.0',
+  deployed_at: '2026-07-01T00:00:00.000Z',
+  rollback_from: `v1.0.1 (git tag; npm ${DEV_PKG_NAME}@1.0.1)`,
+  environments: { prod: 'https://widget.example.invalid' },
+  secret_locations: ['WIDGET_TOKEN @ ~/.config/widget/token'],
+  notes: ['fixture coordination note'],
+};
+
+// Render STATUS.md the way status.cjs would, without touching the repo under
+// test: render into a throwaway dir and read the bytes back.
+function renderedStatusMd(data) {
+  const dir = tmp('render');
+  status.render(dir, data);
+  const text = fs.readFileSync(path.join(dir, 'STATUS.md'), 'utf8');
+  rm(dir);
+  return text;
+}
+
 // The dev repo: origin remote (sanitization checks need a slug to scan for),
 // promotion.json + the PROM record committed. NO tags — the ADR-0019
 // assertion is that finalize never adds one.
-function makeDevRepo(recordText = promRecordText()) {
+function makeDevRepo(recordText = promRecordText(), { runtime = STALE_RUNTIME } = {}) {
   const dir = tmp('dev');
   git(dir, 'init', '-q');
   git(dir, 'config', 'user.email', 'test@example.invalid');
@@ -145,12 +171,15 @@ function makeDevRepo(recordText = promRecordText()) {
   git(dir, 'config', 'commit.gpgsign', 'false');
   git(dir, 'remote', 'add', 'origin', DEV_URL);
   const files = {
+    'package.json': `${JSON.stringify({ name: DEV_PKG_NAME, version: '1.1.0' }, null, 2)}\n`,
     '.verity/promotion.json': `${JSON.stringify({
       schema: 1,
       split_active: true,
       prod_repo: PROD_REPO,
       prod_owned: ['.github/**', 'RELEASE-MANIFEST.json'],
     })}\n`,
+    '.verity/runtime.json': `${JSON.stringify(runtime, null, 2)}\n`,
+    'STATUS.md': renderedStatusMd(runtime),
   };
   if (recordText !== null) {
     files['.verity/promotions/PROM-0001.yml'] = recordText;
@@ -159,6 +188,18 @@ function makeDevRepo(recordText = promRecordText()) {
   git(dir, 'add', '-A');
   git(dir, 'commit', '-q', '-m', 'dev fixture');
   return dir;
+}
+
+function readRuntime(dev) {
+  return JSON.parse(fs.readFileSync(path.join(dev, '.verity/runtime.json'), 'utf8'));
+}
+
+function recordFinalizedAt(dev) {
+  const line = fs
+    .readFileSync(path.join(dev, '.verity/promotions/PROM-0001.yml'), 'utf8')
+    .split('\n')
+    .find((l) => l.startsWith('  finalized_at: '));
+  return line ? line.slice('  finalized_at: '.length) : null;
 }
 
 // The prod stand-in AFTER the review/merge step: baseline (tagged v1.1.0) +
@@ -247,7 +288,7 @@ test('finalize: happy path exits 0 with the full envelope', () => {
   assertEqual(happy.merge_commit, happyProd.mergeSha, 'merge commit from gh');
   assertEqual(happy.tag, 'v1.2.0', 'authoritative tag name');
   assertEqual(happy.release_created, true, 'release issued');
-  assertEqual(happy.published, 'pending-O4', 'npm publish deferred to O4');
+  assertEqual(happy.published, 'workflow-triggered', 'the tag push triggered the publish workflow');
   assertEqual(happy.verification.manifest, 'match', 'manifest verified before tagging');
   assertEqual(
     happy.verification.pack_shasum,
@@ -317,17 +358,202 @@ test('ADR-0019: the DEV repo has NO tags after finalize — authoritative tags a
   assertEqual(git(happyDev, 'tag'), '', 'dev tag list empty after a successful finalize');
 });
 
-test('manual publish instruction: expected shasum present, npm publish named, no secrets or dev identifiers', () => {
+// --- stage 93: the publish notice reports what finalize CAUSED ---------------
+
+test('publish notice: names the trigger, the approval and the verification, with the by-hand fallback', () => {
   const text = happy.publish_instruction;
+  assert(text.includes('.github/workflows/publish.yml'), 'the triggered workflow is named');
+  assert(/on: push.*v\*|v\* tags/.test(text), 'the trigger is stated as a v* tag push');
+  assert(text.includes('npm-publish'), 'the environment gate is named');
+  assert(
+    text.includes(`https://github.com/${PROD_REPO}/actions/workflows/publish.yml`),
+    'the approval URL is the PROD actions URL',
+  );
+  assert(
+    text.includes(`npm view ${DEV_PKG_NAME}@1.2.0 dist.shasum`),
+    'verification names the package from package.json, never a hardcoded name',
+  );
   assert(text.includes(REAL_PACK_SHASUM), 'expected tarball shasum stated');
-  assert(text.includes('npm publish'), 'the manual command is named');
-  assert(text.includes('pending-O4'), 'O4 deferral stated');
+  assert(/[Ff]allback/.test(text), 'the by-hand path is explicitly the fallback');
   assert(text.includes(`https://github.com/${PROD_REPO}.git`), 'clone URL is the PROD repo');
+  assert(text.includes('git checkout v1.2.0'), 'the fallback checks out the authoritative tag');
+  assert(text.includes('npm publish'), 'the by-hand command is still spelled out');
+});
+
+test('publish notice: claims no registry state and names no credential mechanism', () => {
+  const text = happy.publish_instruction;
+  for (const forbidden of ['pending-O4', 'O4', 'NOT executed', 'OIDC', 'token', 'secret']) {
+    assert(!text.includes(forbidden), `notice must not say ${JSON.stringify(forbidden)}`);
+  }
+  assert(!/trusted publish/i.test(text), 'no credential mechanism named');
+  assert(
+    !/\bis published\b|\bhas been published\b/.test(text),
+    'no claim that the package IS published',
+  );
+});
+
+test('publish notice: no secrets or dev identifiers', () => {
+  const text = happy.publish_instruction;
   assert(!text.includes(DEV_SLUG), 'no dev repo name');
   assert(!text.includes(DEV_URL), 'no dev URL');
   for (const p of promotion.SECRET_PATTERNS) {
     assert(!p.re.test(text), `no ${p.name} shape in the instruction`);
   }
+});
+
+test('the success raw line renders the published enum; pending-O4 is gone from the module', () => {
+  assert(
+    happy.raw.includes('(publish: workflow-triggered)'),
+    `raw renders result.published: ${happy.raw}`,
+  );
+  const src = fs.readFileSync(path.join(REPO_ROOT, 'verity/bin/lib/promotion.cjs'), 'utf8');
+  assert(!src.includes('pending-O4'), 'no hardcoded pending-O4 left in promotion.cjs');
+  assert(!src.includes('npm publish NOT executed'), 'the old NOT-executed claim is gone');
+});
+
+// --- stage 91: the release surface is stamped at the moment of release --------
+// The dev fixture goes in reading 1.1.0. Every assertion below fails if
+// finalize completes while the release surface still names the OLD version —
+// which is exactly the drift (1.2.0 and 1.3.0 released, STATUS.md at 1.1.0)
+// that produced this stage.
+
+test('stage 91 regression: runtime.json names the finalized version, not the stale one', () => {
+  const rt = readRuntime(happyDev);
+  assertEqual(rt.version, '1.2.0', 'runtime version is the finalized version (no v prefix)');
+  assertEqual(
+    rt.deployed_at,
+    recordFinalizedAt(happyDev),
+    'ONE clock reading — deployed_at is byte-identical to the record finalized_at',
+  );
+  assertEqual(happy.runtime_stamped, true, 'envelope reports the stamp');
+  assertEqual(happy.runtime_version, '1.2.0', 'envelope names the stamped version');
+});
+
+test('stage 91: rollback_from carries the REPLACED version in the existing string shape', () => {
+  assertEqual(
+    readRuntime(happyDev).rollback_from,
+    `v1.1.0 (git tag; npm ${DEV_PKG_NAME}@1.1.0)`,
+    'previous runtime version; package name read from package.json, never hardcoded',
+  );
+});
+
+test('stage 91: STATUS.md is regenerated as a PURE rendering of the JSON', () => {
+  const rt = readRuntime(happyDev);
+  const text = fs.readFileSync(path.join(happyDev, 'STATUS.md'), 'utf8');
+  assert(text.includes('**Live version:** 1.2.0'), 'live version line matches the JSON');
+  assert(text.includes(`**Deployed at:** ${rt.deployed_at}`), 'deployed-at line matches the JSON');
+  assertEqual(text, renderedStatusMd(rt), 'byte-identical to status.render — no hand-authoring');
+});
+
+test('stage 91: environments / secret_locations / notes are untouched by the stamp', () => {
+  const rt = readRuntime(happyDev);
+  assertEqual(
+    JSON.stringify(rt.environments),
+    JSON.stringify(STALE_RUNTIME.environments),
+    'environments byte-identical',
+  );
+  assertEqual(
+    JSON.stringify(rt.secret_locations),
+    JSON.stringify(STALE_RUNTIME.secret_locations),
+    'secret locations byte-identical',
+  );
+  assertEqual(
+    JSON.stringify(rt.notes),
+    JSON.stringify(STALE_RUNTIME.notes),
+    'notes byte-identical',
+  );
+});
+
+test('stage 91: ONE commit carries the PROM record AND both runtime files', () => {
+  const names = git(happyDev, 'show', '--name-only', '--pretty=format:', 'HEAD')
+    .trim()
+    .split('\n')
+    .sort();
+  assertEqual(
+    names.join(','),
+    ['.verity/promotions/PROM-0001.yml', '.verity/runtime.json', 'STATUS.md'].join(','),
+    'the chore(promotion) commit is the whole release-surface update',
+  );
+});
+
+// A fresh prod+dev fixture per case (the happy pair is shared and already
+// finalized — finalize is not repeatable).
+function finalizeFresh(opts = {}, devOpts = {}) {
+  const prod = makeMergedProd();
+  const dev = makeDevRepo(promRecordText(), devOpts);
+  const calls = [];
+  const r = promotion.finalize('1.2.0', {
+    cwd: dev,
+    prodUrl: prod.bare,
+    gh: finalizeGhStub(calls, { mergeSha: prod.mergeSha }),
+    ...opts,
+  });
+  return { r, dev, prod, calls };
+}
+
+test('stage 91: a runtime.json with version null finalizes, leaving rollback_from alone', () => {
+  const { r, dev, prod } = finalizeFresh(
+    {},
+    { runtime: { ...STALE_RUNTIME, version: null, rollback_from: null } },
+  );
+  assertEqual(r.exit_code, 0, `exit (raw: ${r.raw})`);
+  const rt = readRuntime(dev);
+  assertEqual(rt.version, '1.2.0', 'version stamped from nothing');
+  assertEqual(rt.rollback_from, null, 'no previous version → rollback_from untouched');
+  assertEqual(r.runtime_stamped, true, 'still stamped');
+  rm(dev);
+  rm(prod.bare);
+});
+
+test('stage 91: commitRecord:false writes both runtime files but commits nothing', () => {
+  const { r, dev, prod } = finalizeFresh({ commitRecord: false });
+  assertEqual(r.exit_code, 0, `exit (raw: ${r.raw})`);
+  assertEqual(r.record_committed, false, 'record not committed');
+  assertEqual(r.runtime_stamped, true, 'stamp still written to disk');
+  assertEqual(readRuntime(dev).version, '1.2.0', 'runtime.json written');
+  assert(
+    fs.readFileSync(path.join(dev, 'STATUS.md'), 'utf8').includes('**Live version:** 1.2.0'),
+    'STATUS.md written',
+  );
+  const dirty = git(dev, 'status', '--porcelain');
+  assert(/\.verity\/runtime\.json/.test(dirty), 'runtime.json left UNcommitted');
+  assert(/STATUS\.md/.test(dirty), 'STATUS.md left UNcommitted');
+  assertEqual(git(dev, 'log', '-1', '--pretty=%s').trim(), 'dev fixture', 'no new dev commit');
+  rm(dev);
+  rm(prod.bare);
+});
+
+test('stage 91 FAIL SOFT: a broken status seam warns but never loses the release', () => {
+  const boom = () => {
+    throw new Error('runtime.json is unwritable (simulated)');
+  };
+  const captured = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk) => {
+    captured.push(String(chunk));
+    return true;
+  };
+  let out;
+  try {
+    out = finalizeFresh({ status: { read: boom, write: boom, render: boom } });
+  } finally {
+    process.stderr.write = realWrite;
+  }
+  const { r, dev, prod } = out;
+  assertEqual(r.exit_code, 0, 'EXIT_BUILT — a stamp failure cannot fail a verified release');
+  assertEqual(r.tag, 'v1.2.0', 'tag still reported');
+  assertEqual(r.release_created, true, 'release still reported');
+  assertEqual(r.record_committed, true, 'PROM record still committed');
+  assertEqual(r.runtime_stamped, false, 'the stamp is reported as NOT done');
+  assertEqual(r.runtime_version, null, 'no stamped version is claimed');
+  assertEqual(readRuntime(dev).version, '1.1.0', 'runtime.json left at its stale value');
+  const warned = captured.join('');
+  assert(
+    warned.includes('verity status set version 1.2.0'),
+    'the warning names the manual command to run',
+  );
+  rm(dev);
+  rm(prod.bare);
 });
 
 // --- verify-before-tag: every mismatch aborts, tags NOTHING, status untouched -
@@ -348,6 +574,10 @@ function finalizeExpectingAbort(name, { record, prod, ghState, reMessage, expect
     });
     assertEqual(r.exit_code, 20, `contract exit (raw: ${r.raw})`);
     assert(reMessage.test(r.raw), `refusal names the cause: ${r.raw}`);
+    // Stage 93: nothing was tagged, so nothing was started — on EVERY in-process
+    // refusal path, not just the CLI one below.
+    assertEqual(r.published, 'not-triggered', 'refusal reports no publish trigger');
+    assertEqual(r.publish_instruction, null, 'and prints no publish notice');
     assertEqual(refsOf(p.bare), refsBefore, 'prod refs BYTE-IDENTICAL — nothing tagged');
     assert(!calls.some((a) => a[0] === 'release'), 'no release call ever issued');
     if (recordBefore !== null) {
@@ -460,7 +690,7 @@ test('CLI: finalize --json with no PROM record exits 20 with one compact object'
   assertEqual(lines.length, 1, 'exactly one stdout line (pipe-safe)');
   const obj = JSON.parse(lines[0]);
   assert(/no PROM record/.test(obj.raw), 'the refusal reason reaches the envelope');
-  assertEqual(obj.published, 'pending-O4', 'publish deferral present even on refusal');
+  assertEqual(obj.published, 'not-triggered', 'a refusal tagged nothing, so it started nothing');
   rm(dev);
 });
 

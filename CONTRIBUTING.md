@@ -67,9 +67,23 @@ npm run lint       # Biome formatter + linter (CI mode)
 ### Tests
 
 The runner (`scripts/run-tests.cjs`) is deliberately zero-dependency: it discovers
-every `tests/*.test.cjs`, injects three globals — `test`, `assert`, `assertEqual` —
-runs them, and exits non-zero on any failure. It **refuses a vacuous pass**: if no
-test files exist, it fails.
+every `tests/*.test.cjs`, injects four globals — `test`, `assert`, `assertEqual`,
+`skip` — runs them, and exits non-zero on any failure. It **refuses a vacuous pass**:
+if no test files exist, it fails. It cannot report a pass it did not earn:
+
+- **Test bodies are synchronous.** A body that returns a Promise (an `async`
+  function, or one returning `.then`-able) is a **failure** — it would otherwise
+  "pass" before its assertions ran. Use `spawnSync` / `execFileSync` instead.
+- **Skips are declared, not early `return`s.** Call `skip('why')` inside a
+  `test()` body (e.g. `skip('actionlint not on PATH — ...')`, or
+  `skip('VERITY_X_TEST not set — opt-in lane')` for an opt-in lane). It is printed
+  as `⊘ <name> — <reason>` and tallied as a skip, never a pass. A `skip()` with
+  no reason is a failure. An early `return` is a pass — never use it to skip.
+- **Summary line:** `N passed, M skipped, K failed` (all three counts, always).
+  Skips do not fail the run, unless `VERITY_TEST_FORBID_SKIPS=1` is set — then
+  every skip counts as a failure (for a lane that must be complete).
+- `VERITY_TESTS_DIR` overrides the discovery directory (default `tests/`); the
+  runner's own tests use it to spawn it on fixtures under `tests/fixtures/runner/`.
 
 A test is just a file in `tests/` (useful for reproducing a bug locally —
 include the failing test in your issue and it will likely ship with the fix):
@@ -104,7 +118,7 @@ verity/
   bin/lib/*.cjs         one module per command (config, stage, ledger, release, …)
   templates/*.tmpl      files the scaffolder writes into a new project
   design-guides/*.md    built-in architecture guides the Architect role offers
-commands/verity/*.md    the 15 role slash commands (the public surface)
+commands/verity/*.md    the 16 role slash commands (the public surface)
 docs/                   public docs and specs
 tests/*.test.cjs        the suite
 scripts/run-tests.cjs   the runner
@@ -123,6 +137,16 @@ scripts/run-tests.cjs   the runner
   `verity` CLI calls. See [`docs/commands.md`](docs/commands.md) for the full map.
 - **No new runtime dependencies.** The package ships with zero runtime deps;
   please keep it that way unless there's a strong reason to discuss.
+- **Contracts are pinned.** `tests/contract-pins.test.cjs` derives each frozen
+  contract's documented key set from the contract text itself (its JSON/YAML
+  examples and backticked field names) and fails if the engine emits anything
+  the text does not document. Adding an emitted key — a result field, an
+  effect kind, a record status, a capability — means adding it to the contract
+  text in the same PR, and for the agent result also to `RESULT_KEYS` in
+  `verity/bin/lib/agent-exec.cjs`: the test runner sets
+  `VERITY_STRICT_RESULT_KEYS=1`, so any dispatch that returns an undeclared key
+  throws in every test that drives it. Contract text is architect-owned
+  (ADR-0035); if a pin fails, raise the contract amendment, don't loosen the pin.
 
 ## Design background
 

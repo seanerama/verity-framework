@@ -19,6 +19,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
+const promotionConfig = require('./promotion-config.cjs');
+
 function stageDir(cwd) {
   return path.join(cwd, 'stage-instructions');
 }
@@ -139,7 +141,9 @@ function latestTag(tags) {
 
 // The pure derive layer. It DERIVES; it does not decide whether the snapshot
 // deserved to be believed — its shape is byte-frozen by `verity state view`, so
-// it gains no field. Every caller that turns a projection into an ANSWER must
+// it gains no field (stage 97, ADR-0034, is the one additive exception:
+// `release_source` names where `release` came from). Every caller that turns a
+// projection into an ANSWER must
 // gate on ledger.snapshotVerified(snapshot) first: `dispatch` below refuses, and
 // next.decide() gates at `state:unverified` (stage 20 consumer audit, issue #60).
 // Stage 85 (ADR-0029; operator-smoke finding): the DEFAULT snapshot acquisition
@@ -157,12 +161,35 @@ function acquireSnapshot(cwd, repo) {
   return substrateLocal.fetchSubstrateSnapshot(cwd, { repo });
 }
 
+// Where `release` comes from (stage 97, ADR-0034). Split active ⇒ the highest
+// `released` promotion record (read from cwd, so both substrates — gh-shaped
+// fetchSnapshot and substrate-local — report the same number; the snapshot's
+// tags are NOT consulted: a dev tag is never release truth once the split is
+// on, and no record ⇒ null, never a tag). Not split ⇒ the highest local tag,
+// byte-identical to before. A malformed promotion.json throws (exit 20): the
+// origin of the number cannot be known, so no number is reported.
+function releaseTruth(cwd, snapshot) {
+  if (promotionConfig.read(cwd).split_active) {
+    // Lazy: promotion.cjs requires ledger at its top level (CJS cycle otherwise);
+    // by call time both modules are loaded (the substrate-local precedent above).
+    const promotion = require('./promotion.cjs');
+    const last = promotion.latestReleased(cwd);
+    return {
+      release: last === null ? null : `v${last.version}`,
+      release_source: 'promotion-record',
+    };
+  }
+  return { release: latestTag(snapshot.tags), release_source: 'tag' };
+}
+
 function project(cwd, opts = {}) {
   const snapshot = opts.snapshot || acquireSnapshot(cwd, opts.repo);
   const stages = readStages(cwd).map((s) => deriveStatus(s, snapshot));
+  const { release, release_source } = releaseTruth(cwd, snapshot);
   return {
     online: snapshot.online !== false,
-    release: latestTag(snapshot.tags),
+    release,
+    release_source,
     stages,
     next: unblocked(stages),
   };

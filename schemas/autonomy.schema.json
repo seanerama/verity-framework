@@ -116,7 +116,7 @@
       "additionalProperties": false,
       "properties": {
         "provider": {
-          "description": "Headless runtime the worker dispatches roles to.",
+          "description": "Headless runtime the worker dispatches roles to. This enum is NOT the trust boundary (ADR-0031, stage 94): its values are generated from the engine-owned provider trust table, and widening it grants nothing — a runtime with no table entry is refused for worker selection and for mode: autonomous even if it is named here. Being in the driver registry makes a runtime usable interactively; being in the trust table is what makes it trusted.",
           "enum": ["claude", "codex"],
           "default": "claude"
         },
@@ -153,6 +153,10 @@
           "description": "ADDITIVE, DEFAULT-ABSENT (stage 14, ADR-0011). Which enforcement tier the worker demands of every codex dispatch. Absent = tier 1: credential stripping plus mandatory post-run invariants, which catch a containment violation AFTER it happened and revert what is safely revertible — adequate for supervised/trust-0. 2 = additionally run each role in a DISPOSABLE SHAPED WORKSPACE (paths the role may not touch are physically absent) with a GATED MERGE-BACK deciding what propagates into the real repository, making the violation impossible to propagate. UNATTENDED codex autonomy (mode: autonomous) is REFUSED below 2 (exit 30 containment-tier-required). Codex-only — claude has no containment tiers.",
           "enum": [1, 2]
         },
+        "commit_intent_artifacts": {
+          "description": "ADDITIVE, DEFAULT-ABSENT (stage 96, ADR-0033, #189). When true, the ENGINE commits the intent artifacts a git_write:false role wrote — plan's stage-instructions/, contracts/, feature-assessments/, docs/adr/; revisit's docs/revisit/ — onto the checkout's branch under the verity-worker bot identity and pushes it to the substrate's origin after the role returns: additively by pathspec (never deletions, never paths outside the role's engine-owned roots), idempotently (nothing new ⇒ no commit), non-fatally (a commit or push failure leaves the run's outcome unchanged, prints one stderr line, and is recorded on the result's optional intent_artifacts field). The model still never touches .git. Absent/false is the closed state — byte-identical to today, where those files stayed dirty and unpushed. Provider- and substrate-neutral; per-role override allowed under agent.roles.",
+          "type": "boolean"
+        },
         "roles": {
           "description": "ADDITIVE, DEFAULT-ABSENT (stage 54, ADR-0024). Optional per-role override map: keys are the roles the worker dispatches (build|plan|review), values are PARTIAL agent configs (provider/model plus the codex knobs) validated with the SAME enums as this block. Resolved ONCE at run start and FROZEN by the worker (never re-read mid-run), with containment enforced per role — a per-role codex override still requires tier 2 under mode: autonomous. Overrides may only NARROW a role's sandbox/approval relative to the base. Absent ⇒ byte-identical to a worker-wide agent config (the feature's kill-switch). An unknown role key is a load error (fail closed).",
           "type": "object",
@@ -171,7 +175,8 @@
                   "type": "array",
                   "items": { "type": "string" }
                 },
-                "containment_tier": { "enum": [1, 2] }
+                "containment_tier": { "enum": [1, 2] },
+                "commit_intent_artifacts": { "type": "boolean" }
               }
             }
           }

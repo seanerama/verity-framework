@@ -226,10 +226,7 @@ test('installActions --auth subscription writes the OAuth variant and reports au
 test('actionlint accepts the generated workflow (runs only when actionlint is on PATH)', () => {
   const probe = spawnSync('actionlint', ['-version'], { encoding: 'utf8' });
   if (probe.error || probe.status !== 0) {
-    process.stdout.write(
-      '    (actionlint not on PATH — skipped; fixture test covers the freeze)\n',
-    );
-    return;
+    skip('actionlint not on PATH — fixture test covers the freeze');
   }
   const cwd = sandbox();
   install.installActions({ cwd, bot: 'some-bot' });

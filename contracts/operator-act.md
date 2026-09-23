@@ -80,6 +80,15 @@ of write verbs, each mapping to ONE existing GitHub-label or worker operation:
   / `label-swap` (reject: removes + adds) / `comment` / `worker-tick`; plus the
   label(s)/item or the spawned command. A multi-step verb (`reject`,
   `request-changes`) returns an `effects` array in effect-order.
+- **`effect.kind` notes (additive, ADR-0035):** `label-swap` is reserved — not
+  emitted in v1 (ADR-0035). `reject` is expressed as an `effects[]` array of
+  `label-remove` (`verity:approved`), `label-remove`
+  (`verity:awaiting-approval`), `label-add` (`verity:needs-human`), in that
+  order. A `worker-tick` effect carries `command: string | null` (the spawned
+  command line, `null` when refused), `exitCode: number | null`,
+  `outcome: string` (`refused` / `spawn-error` when the worker never ran;
+  otherwise the tick's own outcome, e.g. `ok` / `failed` / `unknown`) and an
+  optional `summary: string` (first line of the worker's stdout).
 - **`ok`** — `true` only if every underlying operation succeeded; else `false`
   with `reason` naming what failed (redacted). Exit code 0 on ok, non-zero on
   failure (fail-closed).
@@ -93,3 +102,7 @@ grants new authority) is a NEW contract, not an edit (framework-spec §4.3).
 Consumers: the Console's Approvals / Runs / Policy controls. This is the last
 engine seam before the `verity-console` repo; the read seams
 (`operator-snapshot`/`-gate`/`-run`) are frozen and unchanged.
+
+Amended additively 2026-09-23 per ADR-0035: marked `label-swap` reserved (not
+emitted in v1), documented `reject`'s `effects[]` order and the `worker-tick`
+effect fields.
