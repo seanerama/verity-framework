@@ -334,7 +334,7 @@ test('stage 85 (smoke leak 1): verity state on local — ledger acquisition thro
     assertEqual(one.number, 1, 'verity state stage N answers from the local store');
   } finally {
     if (saved === undefined) {
-      // biome-ignore lint/performance/noDelete: assigning undefined would set the env var to the string "undefined"
+      // Assigning undefined would set the env var to the string "undefined".
       delete process.env.GH_REPO;
     } else {
       process.env.GH_REPO = saved;
@@ -430,7 +430,7 @@ test('stage 85 (smoke runs 4/5): VERITY_SUBSTRATE pin — engine-set local outra
   const saved = process.env.VERITY_SUBSTRATE;
   const restore = () => {
     if (saved === undefined) {
-      // biome-ignore lint/performance/noDelete: assigning undefined would set the env var to the string "undefined"
+      // Assigning undefined would set the env var to the string "undefined".
       delete process.env.VERITY_SUBSTRATE;
     } else {
       process.env.VERITY_SUBSTRATE = saved;
@@ -438,7 +438,7 @@ test('stage 85 (smoke runs 4/5): VERITY_SUBSTRATE pin — engine-set local outra
   };
   try {
     // Default-absent: byte-identical policy resolution (unreadable ⇒ github).
-    // biome-ignore lint/performance/noDelete: the absent case must be genuinely absent
+    // The absent case must be genuinely absent.
     delete process.env.VERITY_SUBSTRATE;
     assertEqual(sub.resolveSubstrate(bare), 'github', 'no pin ⇒ policy resolution unchanged');
     assertEqual(sub.pinnedSubstrate(), null);
@@ -495,7 +495,7 @@ test('stage 90: a github run DELETES an inherited VERITY_SUBSTRATE pin; a local 
   const saved = process.env.VERITY_SUBSTRATE;
   const restore = () => {
     if (saved === undefined) {
-      // biome-ignore lint/performance/noDelete: assigning undefined would set the env var to the string "undefined"
+      // Assigning undefined would set the env var to the string "undefined".
       delete process.env.VERITY_SUBSTRATE;
     } else {
       process.env.VERITY_SUBSTRATE = saved;

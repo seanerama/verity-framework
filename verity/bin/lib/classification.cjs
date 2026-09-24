@@ -17,6 +17,10 @@
 
 const BUCKETS = ['public', 'private', 'generated'];
 
+// Object.hasOwn needs Node 16.9 and engines allows 16.7, so own-key checks call
+// the prototype method through this reference (Biome 2 flags the inline form).
+const hasOwn = Object.prototype.hasOwnProperty;
+
 // --- minimal strict parser for the classification's YAML shape ---------------
 // Supports exactly: top-level `key: value` / `key:`, and a list of flat maps
 // (`- key: value` items with 4-space-indented continuation keys). Comments and
@@ -91,7 +95,7 @@ function parseClassification(text) {
       if (!item) {
         throw new Error(`line ${n}: continuation key outside a list item`);
       }
-      if (Object.prototype.hasOwnProperty.call(item, m[1])) {
+      if (hasOwn.call(item, m[1])) {
         throw new Error(`line ${n}: duplicate key ${m[1]}`);
       }
       item[m[1]] = parseScalar(m[2], n);

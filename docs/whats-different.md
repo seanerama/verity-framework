@@ -64,7 +64,8 @@ people who know verity-framework and want the delta.
   (`.verity/autonomy.yml`, the cron line and/or Actions workflow, bot + secrets checklists,
   and a `DEPLOYMENT.md`), so turning autonomy on is answer-a-few-questions, not hand-edit-YAML.
 
-  (the classic framework had 13 roles; the autonomy layer adds these two → 15.)
+  (13 classic roles + these two from the autonomy layer + `/verity:revisit`, added in
+  stage 95 → 16 packaged roles.)
 
 **New onboarding tooling**
 
@@ -74,7 +75,7 @@ people who know verity-framework and want the delta.
 
 ## What's unchanged
 
-- **All 13 `/verity:*` roles** and the whole CLI surface from verity-framework.
+- **All 16 `/verity:*` roles** and the whole CLI surface from verity-framework.
 - The **deployment-methods catalog** (`verity deployment …`) — where your *app* ships.
 - The **state-from-GitHub** model, the CI hygiene gate, the docs and guides.
 - **`mode: manual` is byte-identical to upstream.** Autonomy ships off by default; with it

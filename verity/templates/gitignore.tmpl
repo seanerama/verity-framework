@@ -10,3 +10,38 @@ dist/
 # Per-app deployment access (host + credential locations) — shared out-of-band,
 # never committed. The committed pointer (.verity/deploy-access.README.md) stays.
 .verity/deploy-access.md
+# --- Stack-agnostic derived output -------------------------------------------
+# The stack is chosen later (by the Architect), so this covers unambiguous build
+# junk across common stacks. Directories a project may legitimately track
+# (bin/, obj/, build/) are deliberately NOT ignored; the CI `structure` job's
+# tracked-artifacts check is the backstop for bytecode and tool caches.
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.tox/
+# Ruby
+.bundle/
+vendor/bundle/
+# Go (test binaries only; bin/ is left to the project)
+*.test
+# Rust
+target/
+# JVM (build/ is left to the project; *.class is caught by CI anyway)
+*.class
+.gradle/
+# .NET (bin/ and obj/ are left to the project)
+*.user
+# Generic: coverage, logs, caches, editor swap files, OS metadata
+coverage/
+*.log
+.cache/
+*.swp
+*.swo
+Thumbs.db
+*:Zone.Identifier

@@ -454,7 +454,7 @@ test('e2e: request → plan → build → gated-at-review posts EXACTLY the §7 
       'roles: plan → build → review\n' +
       'result: PR #114 opened, gated at review:merge\n' +
       'tokens: 1236k in / 114k out · est \\$5\\.61 · wall \\d+m\\d+s\n' +
-      'approve: apply label `verity:approved` or comment `/verity approve`$',
+      'approve: apply label `verity:approved`$',
   );
   assert(re.test(summary), `summary matches the §7 template exactly, got:\n${summary}`);
   assertEqual(all.filter((b) => b.startsWith('🤖')).length, 1, 'exactly one summary per run');
@@ -1066,7 +1066,7 @@ test('formatRunSummary: gated — byte-exact §7 template incl. approve line', (
       'roles: plan → build → test\n' +
       'result: PR #114 opened, gated at review:merge\n' +
       'tokens: 412k in / 38k out · est $1.87 · wall 11m42s\n' +
-      'approve: apply label `verity:approved` or comment `/verity approve`',
+      'approve: apply label `verity:approved`',
   );
 });
 

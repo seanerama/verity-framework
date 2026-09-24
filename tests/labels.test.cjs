@@ -239,3 +239,133 @@ test('partial gh failure: remaining labels still attempted, failures reported', 
   assertEqual(r.failed[0].name, 'verity:ready');
   assertEqual(r.failed[0].error, 'HTTP 502 from gh');
 });
+
+// --- Stage 105 (#172): a just-created repo's empty `gh label list` ---------
+// Right after `gh repo create --push`, GitHub can answer `gh label list` with
+// an EMPTY body and exit 0. ensureLabels re-reads it (bounded, injectable
+// sleep) instead of failing the whole ensure on JSON.parse('').
+
+// A run() whose `list` plays `bodies` in order (a function entry throws), and
+// whose create/edit always succeed. Records every list call.
+function listSequence(bodies) {
+  const lists = [];
+  const run = (args) => {
+    if (args[0] === 'list') {
+      const body = bodies[Math.min(lists.length, bodies.length - 1)];
+      lists.push(args);
+      if (typeof body === 'function') {
+        return body();
+      }
+      return body;
+    }
+    return '';
+  };
+  return { run, lists };
+}
+
+function recordingSleep() {
+  const waits = [];
+  return { sleep: (ms) => waits.push(ms), waits };
+}
+
+test('fresh repo race: empty list twice, then the array → ok after 3 reads, 2 bounded waits', () => {
+  const { run, lists } = listSequence(['', '  \n', '[]']);
+  const { sleep, waits } = recordingSleep();
+  const r = labels.ensureLabels('/tmp', run, { substrate: 'github', sleep });
+  assertEqual(r.ok, true, 'the ensure succeeds once the list is consistent');
+  assertEqual(r.created.length, 12, 'then every label is created as usual');
+  assertEqual(lists.length, 3, 'three list reads');
+  assertEqual(JSON.stringify(waits), JSON.stringify([500, 1000]), 'the first two default delays');
+});
+
+test('fresh repo race: an empty list on every read → ok:false naming the attempt count', () => {
+  const { run, lists } = listSequence(['']);
+  const { sleep, waits } = recordingSleep();
+  const r = labels.ensureLabels('/tmp', run, { substrate: 'github', sleep });
+  assertEqual(r.ok, false);
+  assertEqual(r.skipped, true);
+  assertEqual(
+    r.error,
+    'gh label list returned no label data after 5 attempts (fresh repo not yet consistent?)',
+  );
+  assertEqual(lists.length, 5, 'default 5 reads');
+  assertEqual(
+    JSON.stringify(waits),
+    JSON.stringify([500, 1000, 2000, 4000]),
+    'bounded: 4 waits, under 8 s total',
+  );
+});
+
+test('fresh repo race: attempts / delaysMs are injectable; the error names N', () => {
+  const { run, lists } = listSequence(['']);
+  const { sleep, waits } = recordingSleep();
+  const r = labels.ensureLabels('/tmp', run, {
+    substrate: 'github',
+    sleep,
+    attempts: 3,
+    delaysMs: [7],
+  });
+  assertEqual(lists.length, 3);
+  assertEqual(JSON.stringify(waits), JSON.stringify([7, 7]), 'the last delay repeats');
+  assert(r.error.includes('after 3 attempts'), 'the error names the attempt count');
+});
+
+test('fresh repo race: a non-JSON or non-array body is treated like an empty one', () => {
+  for (const junk of ['not json', '{}', 'null']) {
+    const { run, lists } = listSequence([junk, '[]']);
+    const { sleep, waits } = recordingSleep();
+    const r = labels.ensureLabels('/tmp', run, { substrate: 'github', sleep });
+    assertEqual(r.ok, true, `${junk}: retried, then ok`);
+    assertEqual(lists.length, 2, `${junk}: two reads`);
+    assertEqual(waits.length, 1, `${junk}: one wait`);
+  }
+  const { run } = listSequence(['not json']);
+  const r = labels.ensureLabels('/tmp', run, { substrate: 'github', sleep: () => {} });
+  assertEqual(r.ok, false, 'never-JSON exhausts like never-data');
+  assert(r.error.includes('after 5 attempts'), 'same exhaustion error');
+});
+
+test('a THROWN list (non-zero exit) is final: one read, no wait, the shape of today', () => {
+  const { run, lists } = listSequence([
+    () => {
+      throw new Error('HTTP 404: Not Found\nmore detail');
+    },
+  ]);
+  const { sleep, waits } = recordingSleep();
+  const r = labels.ensureLabels('/tmp', run, { substrate: 'github', sleep });
+  assertEqual(
+    JSON.stringify(r),
+    JSON.stringify({ ok: false, skipped: true, error: 'HTTP 404: Not Found' }),
+  );
+  assertEqual(lists.length, 1, 'no retry here: gh.run owns non-zero-exit retries');
+  assertEqual(waits.length, 0, 'no wait');
+});
+
+test('a valid list on the first read: one call, no wait (the pre-105 path)', () => {
+  const store = labels.LABELS.map((l) => ({ ...l }));
+  const { run, lists } = listSequence([JSON.stringify(store)]);
+  const { sleep, waits } = recordingSleep();
+  const r = labels.ensureLabels('/tmp', run, { substrate: 'github', sleep });
+  assertEqual(r.ok, true);
+  assertEqual(r.unchanged.length, 12);
+  assertEqual(lists.length, 1, 'one read');
+  assertEqual(waits.length, 0, 'no wait');
+});
+
+test('local substrate still short-circuits before any list read (contract local-work-item v1)', () => {
+  const { run, lists } = listSequence(['']);
+  const { sleep, waits } = recordingSleep();
+  const r = labels.ensureLabels('/tmp', run, { substrate: 'local', sleep });
+  assertEqual(
+    JSON.stringify(r),
+    JSON.stringify({
+      ok: true,
+      skipped: true,
+      substrate: 'local',
+      created: [],
+      updated: [],
+      unchanged: [],
+    }),
+  );
+  assertEqual(lists.length + waits.length, 0, 'zero gh calls, zero waits');
+});

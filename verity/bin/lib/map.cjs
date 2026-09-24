@@ -69,7 +69,7 @@ function generate(cwd, opts = {}) {
   return { path: out, nodes: graph.nodes.length, edges: graph.edges.length };
 }
 
-function dispatch(args, flags) {
+function dispatch(_args, flags) {
   const cwd = flags.cwd || process.cwd();
   return generate(cwd, { depth: flags.depth });
 }

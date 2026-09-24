@@ -1,5 +1,112 @@
 # Changelog
 
+## [Unreleased]
+
+## 1.5.0
+
+### Added
+
+- **`verity golive` can say not applicable, and the manual gates are answered
+  on the record (stage 107, dev#279).** `verity status secret --none "<reason>"`
+  records `n/a: <reason>` for a project that has no secret location to record,
+  which satisfies the secret-locations auto-check. The reason must be at least 10
+  characters, and a project cannot record both a location and `--none`. A
+  hand-written `n/a:` with no reason fails the check and says why. The five
+  manual gates now have stable ids (`secrets-rotated`, `throwaway-accounts`,
+  `cross-user-isolation`, `backup-coverage`, `security-signoff`), and
+  `verity golive confirm <id> --by <who> [--na "<reason>"]` records an `ok` or
+  `n/a` answer with the name and time. `verity golive reset <id>` removes an
+  answer. Answers are stored under a new optional `golive` key in
+  `.verity/runtime.json` and rendered in a new `## Go-live gate` section of
+  `STATUS.md`. A runtime.json without the key reads and renders exactly as
+  before. `verity golive` now returns each manual gate as an object with its
+  answer, and `ready` is true only when the auto-checks pass and every gate is
+  answered. Unanswered gates are named in the output. An answer without `--by`,
+  or an `n/a` with a reason shorter than 10 characters, is refused.
+
+### Changed
+
+- **Biome 2.5.14, and lint warnings now fail the gate (stage 106).** The dev
+  dependency moves from 1.9.4 to 2.5.14 and `biome.json` is migrated by hand to
+  the 2.x schema, keeping the `recommended` preset. `npm run lint` is now
+  `biome ci --error-on-warnings .`, because Biome 2 reports recommended rules as
+  warnings and `biome ci` would otherwise exit 0 on them. The plain-JS rules
+  that 1.9.4 enforced and 2.x dropped or moved down to `info` (`noVar`,
+  `noForEach`, `useTemplate`, and others) are set to `"error"`, so the gate is
+  as strict as before. Two rules are off on purpose: `noTemplateCurlyInString`,
+  because the installer writes literal `${{ }}` GitHub Actions expressions,
+  and `noDelete`, because the tree deletes env vars to restore them. The
+  diagnostics the new version raised on the existing tree are fixed with no
+  behaviour change. A new test pins the preset, the parity rules, the two
+  opt-outs, the flag, and the exact version.
+- **Docs match the CLI (stage 104).** True role counts (16), a roster table mapping
+  the design spec's roles to packaged commands, a one-line index of all 33 `verity`
+  verbs in `docs/commands.md`, the phantom `/verity approve` removed from the docs and
+  from the worker's gate comment (the `verity:approved` label was always the only
+  token), the Node claim narrowed (product needs 16.7 or newer, the test suite 18 or
+  newer), and the release runbook now says `promotion project` and `verify` must share
+  one `--report` path. Two tests pin the verb index and the role count.
+- **Canary refresh (stage 102):** added observed Codex evidence in `docs/dev/codex-headless-canary-results-0.154.0.md`, and re-verified the Claude Code headless invocation against 2.1.281. Neither version floor moved.
+
+### Fixed
+
+- **Headless role arguments are no longer silently dropped (stage 103, canary finding F-B).**
+  Before this fix, `verity agent-exec plan ISSUE-1` never showed `ISSUE-1` to the model.
+  Both headless drivers substituted only a `$ARGUMENTS` placeholder, and only `build` and
+  `review` carry one. The worker's `plan` dispatch lost its issue number the same way.
+  Now a role without the placeholder gets an `ARGUMENTS: <args>` line appended before the
+  result contract, which is the same convention Claude Code uses for slash commands. Both
+  drivers share one `applyRoleArgs` helper. Roles with the placeholder render exactly as
+  before, and a render with no args is byte-identical.
+
+- **Scaffolded projects ignore more than Node output, and CI rejects tracked
+  bytecode (stage 105, dev#178).** The scaffold's `.gitignore` used to cover only
+  Node, so a Python fixture committed `__pycache__/*.pyc` in its first PR and CI
+  stayed green. The template now adds stack-agnostic sections for Python, Ruby,
+  Go, Rust, the JVM, .NET and generic caches. Every existing line is kept, and
+  `bin/`, `obj/` and `build/` are left out on purpose because a project may
+  track them. The scaffolded CI `structure` job gains a *Tracked build artifacts
+  absent* step: it fails, naming the paths, when `__pycache__/`, `.pyc`, `.pyo`,
+  `.class`, `.pytest_cache/`, `node_modules/`, `.DS_Store` or `.egg-info/` are
+  tracked, whatever the ignore file says. This applies to newly scaffolded
+  projects only: `scaffold init` still skips existing files without `--force`.
+- **Label ensure tolerates a just-created repo (stage 105, dev#172).** In the
+  seconds after `gh repo create --push`, `gh label list` can return an empty
+  body with exit 0, and the benchmark provision failed at step `labels` before
+  any agent spend. `ensureLabels` now re-reads an empty or non-array list up to
+  5 times (waits of 0.5, 1, 2 and 4 seconds) before giving up with an error
+  that names the attempt count. A failing `gh` call is still final there, as
+  before, because the shared `gh` layer owns that retry. `verity install` on a
+  fresh repo gets the same fix.
+
+### Merged commits (generated from Conventional Commits; `dev#NN` = dev-repo PR)
+
+
+#### Fixes
+- drop the dead docs/security-report.md rule — main red since f4d4ba9
+
+#### Chores
+- record PROM-0003 — finalize v1.4.0 released (prod tag v1.4.0)
+- record PROM-0003 — propose v1.4.0 (prod PR 6)
+
+#### Other
+- docs(changelog): curated [Unreleased] entry for the stage 104 docs sweep
+- ship(status): record the six secret locations (names and locations only) — golive auto-checks now 3/3
+- [stage 107] golive can say not applicable: status secret --none, recorded dispositions for the five manual gates, ready = auto-checks pass and every gate answered (dev#280)
+- plan(stage 107): golive can say not applicable — n/a form for secret locations, recorded dispositions for the five manual gates, readiness = every gate answered; refs dev#279
+- sre: author recovery-plan.md for the framework itself (revisit proposal 8) — registry dist-tag rollback + forward-fix, backup contract per store, asleep-vs-incident table, secret rotation table, drill record; open items: npm login for rollback, tracker dump, rotation dates, first drill
+- security: author docs/security-invariants.md for the framework itself (revisit proposal 8) — five trust boundaries, mechanism-cited invariants, n/a items recorded for golive, secret locations (names only); classify the security/recovery docs private
+- architect: ADR hygiene pass (revisit 2026-09-22 proposal 7) — twelve Proposed→Accepted with implementing stages/PRs, 0003 superseded in effect by the scaffold gates job, 0018/0019/0026 amended to match practice (baseline is an opt-in lane; dev derives from promotion records; registration never required of the role)
+- [stage 106] Biome 1.9.4 to 2.5.14: hand-migrated config with the recommended preset kept, warnings promoted to gate failures, and the 45 diagnostics the new version raises cleared (dev#278)
+- plan(stage 106): Biome 1.9.4 → 2.5.14 — hand-migrated config keeps the recommended preset, --error-on-warnings keeps gate parity, 45 diagnostics inventoried; refs dev#277
+- [stage 105] Harness robustness: stack-agnostic scaffold .gitignore + tracked-artifacts structure check (dev#178), label ensure re-reads a fresh repo's empty list (dev#172) (dev#276)
+- plan(stage 105): harness robustness — stack-agnostic scaffold .gitignore + bytecode structure check (dev#178), label-ensure tolerates a fresh repo's empty list (dev#172); refs dev#275
+- [stage 104] Docs-literal sweep: role counts, roster mapping, CLI verb index, the phantom approve command, the Node claim, and the shared-report runbook step (dev#274)
+- plan(stage 104): docs-literal sweep — role counts, roster mapping, CLI verb index, phantom approve, Node claim, shared-report runbook (dev#273)
+- [stage 103] Headless role arguments are never silently dropped: a role without $ARGUMENTS gets an appended ARGUMENTS line, mirroring Claude Code's slash-command convention (dev#272)
+- [stage 102] Canary refresh on today's runtimes: committed Codex 0.154.0 canary results and a re-verified Claude Code headless invocation shape, floors unchanged (dev#270)
+- [stage 101] Tracker hygiene: close the five issues whose work has merged, retitle the one with a residual, and record the O5 disposition (dev#269)
+
 ## 1.4.0
 
 ### Added
@@ -65,8 +172,8 @@
   byte-identical.
 - **Context discipline is now a shared preamble on every role.** A new
   `preamble-delegation.md.tmpl` block joins the ADR-0002 transform pipeline as
-  its second *unconditional* entry, so all 15 roles get it at install time on
-  all three hosts (`claude` / `opencode` / `codex`): delegate bulk work to a
+  its second *unconditional* entry, so every packaged role gets it at install
+  time on all three hosts (`claude` / `opencode` / `codex`): delegate bulk work to a
   sub-agent and take back a summary, stay inside your own artifacts, read
   narrowly. Previously only `build` carried any delegation language — every
   other role ran all of its work in the main loop with nothing telling it

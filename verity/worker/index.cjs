@@ -174,7 +174,7 @@ const trust = require('../bin/lib/trust.cjs');
 const usage = require('../bin/lib/usage.cjs');
 
 const USAGE = 'usage: verity-worker --repo owner/name --once';
-const APPROVAL_ACTION = 'apply label `verity:approved` or comment `/verity approve`';
+const APPROVAL_ACTION = 'apply label `verity:approved`';
 
 function labelName(name) {
   const label = LABELS.find((l) => l.name === name);
@@ -2126,7 +2126,7 @@ function runOnce(ctx) {
   if (ctx.substrate === 'local') {
     process.env.VERITY_SUBSTRATE = 'local';
   } else {
-    // biome-ignore lint/performance/noDelete: assigning undefined would set the env var to the string "undefined"
+    // Assigning undefined would set the env var to the string "undefined".
     delete process.env.VERITY_SUBSTRATE;
   }
   // Stage 79 (ADR-0029): a policy selecting a substrate this engine cannot

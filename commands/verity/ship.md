@@ -67,6 +67,14 @@ Continuous CD to STAGING on every merge; PROD is a deliberate cut release.
    verity status set environments.prod.digest <sha256>
    verity status secret "<NAME> @ <on-disk location>"   # locations only, never values
    ```
+   If the project stores no secrets anywhere (no deploy host, credentials only in the
+   operator's environment), say so explicitly instead of recording a location that
+   does not exist:
+   ```bash
+   verity status secret --none "<reason, at least 10 characters>"
+   ```
+   This records `n/a: <reason>`. A project cannot have both: `--none` is refused once
+   a location is recorded, and a location is refused once `--none` is.
    On the **direct `release cut` path** (no promotion), nothing is stamped for you
    — set the version fields yourself:
    ```bash

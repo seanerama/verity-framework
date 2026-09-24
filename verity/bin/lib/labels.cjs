@@ -98,6 +98,52 @@ function firstLine(err) {
   return String(err?.message || err).split('\n')[0];
 }
 
+// Stage 105 (#172): the bounded read of `gh label list`. In the seconds after
+// `gh repo create --push`, GitHub can answer the list with an EMPTY body and
+// exit 0. gh.run only retries non-zero exits, so it treats that as success, and
+// a single JSON.parse('') used to fail the whole ensure. An empty/whitespace
+// body, or one that is not a JSON ARRAY, means "not yet consistent": wait and
+// read again, a bounded number of times (default 5 reads, 500 ms → 4 s between
+// them, under 8 s in total). A THROWN run (non-zero exit) is final here, since
+// gh.run already owns that retry policy. opts.attempts / opts.delaysMs /
+// opts.sleep are injectable so tests never sleep for real.
+const LIST_ATTEMPTS = 5;
+const LIST_DELAYS_MS = [500, 1000, 2000, 4000];
+
+function readLabelList(cwd, run, opts) {
+  const attempts =
+    Number.isInteger(opts.attempts) && opts.attempts > 0 ? opts.attempts : LIST_ATTEMPTS;
+  const delays =
+    Array.isArray(opts.delaysMs) && opts.delaysMs.length > 0 ? opts.delaysMs : LIST_DELAYS_MS;
+  const sleep = typeof opts.sleep === 'function' ? opts.sleep : gh.sleepSync;
+  for (let i = 0; i < attempts; i += 1) {
+    let body;
+    try {
+      body = run(['list', '--limit', '200', '--json', 'name,color,description'], cwd);
+    } catch (err) {
+      return { ok: false, error: firstLine(err) };
+    }
+    const text = String(body ?? '');
+    if (text.trim() !== '') {
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+          return { ok: true, labels: parsed };
+        }
+      } catch {
+        // not JSON yet: fall through to the bounded wait below
+      }
+    }
+    if (i < attempts - 1) {
+      sleep(delays[Math.min(i, delays.length - 1)]);
+    }
+  }
+  return {
+    ok: false,
+    error: `gh label list returned no label data after ${attempts} attempts (fresh repo not yet consistent?)`,
+  };
+}
+
 // Idempotent: missing labels are created, drifted ones are edited in place,
 // matching ones are left alone. No delete verb exists in this module on purpose.
 function ensureLabels(cwd, run = ghLabel, opts = {}) {
@@ -111,12 +157,11 @@ function ensureLabels(cwd, run = ghLabel, opts = {}) {
   if (substrate === 'local') {
     return { ok: true, skipped: true, substrate: 'local', created: [], updated: [], unchanged: [] };
   }
-  let existing;
-  try {
-    existing = JSON.parse(run(['list', '--limit', '200', '--json', 'name,color,description'], cwd));
-  } catch (err) {
-    return { ok: false, skipped: true, error: firstLine(err) };
+  const read = readLabelList(cwd, run, opts);
+  if (!read.ok) {
+    return { ok: false, skipped: true, error: read.error };
   }
+  const existing = read.labels;
   const byName = new Map(existing.map((l) => [l.name.toLowerCase(), l]));
 
   const created = [];

@@ -447,7 +447,7 @@ test('e2e REGRESSION (canary run 5 tick 3): under a DEFERRED refusal a lagged P1
     'the single-use approval was consumed — identical downstream semantics to a normal P1 pick',
   );
   // The fallback actually did the fresh, bounded, non-search read.
-  const cs = calls(fx).filter((c) => true);
+  const cs = calls(fx).filter((_c) => true);
   assert(awaitingListCalls(cs).length >= 1, 'the fallback enumerated awaiting-approval carriers');
   assert(
     freshLabelViewCalls(cs).length >= 1,

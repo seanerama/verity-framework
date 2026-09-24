@@ -37,6 +37,7 @@ const {
   AgentExecError,
   OUTCOMES,
   RESULT_CONTRACT,
+  applyRoleArgs,
   extractMarker,
   isPlainObject,
   validateRoleOutcome,
@@ -425,7 +426,8 @@ function annotate({ role, logDir }) {
 // codex host pass, frontmatter stripped, role args resolved (the codex pass
 // rewrites $ARGUMENTS to its named placeholder — headless execution resolves
 // that placeholder here, exactly as agent-exec resolves $ARGUMENTS for
-// claude), then the shared headless result-contract footer.
+// claude; a role with neither gets an appended `ARGUMENTS:` line, stage 103),
+// then the shared headless result-contract footer.
 //
 // `ctx.git` (stage 17, ADR-0012) is the Verity-performed-git plan when there is
 // one. It flips the OPTION-KEYED `verityPerformsGit` preamble block on, so the
@@ -461,9 +463,11 @@ function renderPrompt(file, roleArgs, ctx = {}) {
   // role (issue #170)). Neutralize them to inert prose; ADR-0006 keeps skills
   // explicit-invocation-only, so a handoff must never fire from a role's own body.
   text = text.replace(/\$verity-([a-z][a-z0-9-]*)/g, 'the verity:$1 role');
-  const args = roleArgs.join(' ');
-  text = text.split(CODEX_ARGUMENTS_PLACEHOLDER).join(args);
-  text = text.replace(/\$ARGUMENTS/g, args);
+  // Stage 103 (F-B): a role with no placeholder gets an appended `ARGUMENTS:` line
+  // (shared with claude via applyRoleArgs) instead of silently losing its args.
+  text = applyRoleArgs(text, roleArgs, {
+    placeholders: [CODEX_ARGUMENTS_PLACEHOLDER, '$ARGUMENTS'],
+  });
   return `${text.trimEnd()}\n${RESULT_CONTRACT}`;
 }
 

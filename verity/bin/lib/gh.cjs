@@ -22,6 +22,8 @@
 //   verity:gh status=<ok|retry|fail> attempt=<n>/<max> exit=<code> ms=<ms> reason=<r> cmd="gh ..."
 //
 // Exported for tests (internal, not a stability contract): backoffMs, classify.
+// Exported for reuse (stage 105): sleepSync — the one synchronous sleep the
+// gh-facing modules share (labels.cjs's fresh-repo list retry).
 const { execFileSync } = require('node:child_process');
 
 const MAX_RETRIES = 3;
@@ -173,4 +175,4 @@ function isRepoSlug(value) {
   return typeof value === 'string' && !/[\r\n]/.test(value) && REPO_SLUG_RE.test(value);
 }
 
-module.exports = { run, json, GhError, backoffMs, classify, isRepoSlug };
+module.exports = { run, json, GhError, backoffMs, classify, isRepoSlug, sleepSync };

@@ -1488,3 +1488,69 @@ for (const P of PROVIDER_CASES) {
     assert(fs.existsSync(transcript), 'partial transcript retained');
   });
 }
+
+// ---------------------------------------------------------------------------
+// Stage 103 (canary finding F-B, #271): the codex driver delivers positional
+// role args exactly like claude — placeholder substitution when the role has
+// one, else an appended `ARGUMENTS: <args>` line before the result contract;
+// empty args render byte-identically to before.
+// ---------------------------------------------------------------------------
+{
+  const install103 = require('../verity/bin/lib/install.cjs');
+  const { RESULT_CONTRACT } = require('../verity/bin/lib/agents/result-contract.cjs');
+  const SENTINEL = 'ZZ-SENTINEL-42';
+  const CONTRACT_HEAD = RESULT_CONTRACT.trim().split('\n')[0];
+
+  test('stage 103: codex plan.md with args shows them to the model, before the result contract (F-B)', () => {
+    const prompt = codex.renderPrompt(path.join(ROLES_DIR, 'plan.md'), [SENTINEL]);
+    const line = `\n\nARGUMENTS: ${SENTINEL}\n`;
+    assert(prompt.includes(line), 'plan.md prompt carries the appended ARGUMENTS line');
+    const contractAt = prompt.indexOf(CONTRACT_HEAD);
+    assert(contractAt > -1, 'result contract present');
+    assert(prompt.indexOf(line) < contractAt, 'ARGUMENTS line lands before the result contract');
+    assert(prompt.endsWith(RESULT_CONTRACT), 'result contract stays the last block');
+  });
+
+  test('stage 103: codex build.md with args is substituted only — never double-delivered', () => {
+    const prompt = codex.renderPrompt(path.join(ROLES_DIR, 'build.md'), ['7']);
+    assert(!prompt.includes('$ARGUMENTS'), '$ARGUMENTS resolved');
+    assert(!prompt.includes(install103.CODEX_ARGUMENTS_PLACEHOLDER), 'codex placeholder resolved');
+    assert(!prompt.includes('\nARGUMENTS:'), 'no appended ARGUMENTS line on a placeholder role');
+  });
+
+  test('stage 103: codex plan.md with no args renders byte-identically to the pre-fix shape', () => {
+    const file = path.join(ROLES_DIR, 'plan.md');
+    const prompt = codex.renderPrompt(file, []);
+    assert(!prompt.includes('ARGUMENTS:'), 'no ARGUMENTS line without args');
+    assert(prompt.endsWith(RESULT_CONTRACT), 'ends with the result contract');
+    // The pre-stage-103 render, reconstructed (no ctx): plan.md has no placeholder,
+    // so the old split/replace pair was a no-op.
+    const before = install103
+      .renderRole(file, {}, 'codex')
+      .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
+      .replace(/\$verity-([a-z][a-z0-9-]*)/g, 'the verity:$1 role')
+      .trimEnd();
+    assertEqual(prompt, `${before}\n${RESULT_CONTRACT}`, 'byte-identical to the pre-fix render');
+  });
+
+  test('stage 103: codex sweep — every packaged role delivers its args, never drops or doubles them', () => {
+    const roles = fs.readdirSync(ROLES_DIR).filter((n) => n.endsWith('.md'));
+    assert(roles.length >= 16, 'sweep covers every packaged role');
+    for (const name of roles) {
+      const file = path.join(ROLES_DIR, name);
+      const body = fs.readFileSync(file, 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '');
+      const placeholders = body.split('$ARGUMENTS').length - 1;
+      const prompt = codex.renderPrompt(file, [SENTINEL]);
+      const seen = prompt.split(SENTINEL).length - 1;
+      const appended = prompt.includes(`\nARGUMENTS: ${SENTINEL}\n`);
+      if (placeholders === 0) {
+        assertEqual(seen, 1, `${name}: sentinel appears exactly once (appended line)`);
+        assert(appended, `${name}: delivered via the appended ARGUMENTS line`);
+      } else {
+        assertEqual(seen, placeholders, `${name}: sentinel fills each placeholder, nothing more`);
+        assert(!appended, `${name}: placeholder role gets no appended line`);
+      }
+      assert(prompt.endsWith(RESULT_CONTRACT), `${name}: result contract stays last`);
+    }
+  });
+}

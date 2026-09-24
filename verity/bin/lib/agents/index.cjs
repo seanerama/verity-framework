@@ -23,6 +23,10 @@
 // worker cannot select it until stage 9.
 const { AgentExecError } = require('./result-contract.cjs');
 
+// Object.hasOwn needs Node 16.9 and engines allows 16.7, so own-key checks call
+// the prototype method through this reference (Biome 2 flags the inline form).
+const hasOwn = Object.prototype.hasOwnProperty;
+
 const PROVIDERS = {
   claude: require('./claude.cjs'),
   codex: require('./codex.cjs'),
@@ -36,7 +40,7 @@ function listProviders() {
 // an AgentExecError so agent-exec maps it onto the existing unsupported-agent
 // infra path (exit 30 + one stderr line), never a stack trace.
 function getProvider(id) {
-  if (!Object.prototype.hasOwnProperty.call(PROVIDERS, id)) {
+  if (!hasOwn.call(PROVIDERS, id)) {
     throw new AgentExecError(
       `unsupported agent '${id}' — supported providers: ${listProviders().join(', ')}`,
       'unsupported-agent',

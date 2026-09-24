@@ -61,7 +61,7 @@ if (args[0] === 'login') { process.stdout.write('Logged in\\n'); process.exit(0)
 const flag = (n) => args[args.indexOf(n) + 1];
 const cwd = flag('--cd');
 const logDir = path.dirname(flag('--output-last-message'));
-// The script is delivered through the run's OWN state root (\$HOME/.verity),
+// The script is delivered through the run's OWN state root ($HOME/.verity),
 // never through the repository: a script that lived in the repo would have to
 // be committed, and would then travel — or fail to travel — with whatever
 // branch Verity checked out. This fixture must be able to change the script
