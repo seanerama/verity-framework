@@ -313,7 +313,7 @@ function describe(r) {
 // everything and hand the coordinator a loud single-line error. Returns
 // { merged, rejected, changed, error } with error null when nothing was
 // rejected (the common case, and the only quiet one).
-function merge(ws, policy) {
+function merge(ws, _policy) {
   const changed = changes(ws);
   const { accepted, rejected } = gate(ws, changed);
   if (rejected.length > 0) {

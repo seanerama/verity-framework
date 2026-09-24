@@ -14,7 +14,8 @@ named in the table — `/verity:ship` runs the Release/Deploy Operator,
 and so on. Start any new project with [`/verity:vision`](#design).
 
 > The commands are the public surface. Underneath, each one calls the deterministic
-> `verity` CLI (run `verity help` to see it) — but you rarely touch the CLI directly.
+> `verity` CLI (run `verity help` to see it; every verb is indexed under
+> [CLI verbs](#cli-verbs)) — but you rarely touch the CLI directly.
 
 ---
 
@@ -126,7 +127,11 @@ verity promotion verify <staging-dir> [--report <path>] [--baseline <version>] [
 - `--report <path>` — the projection report to extend (defaults to
   `<staging-dir>.report.json`). `verify` adds a `verify` block
   `{gates, pack_shasum, baseline, verdict}` **additively** — the `project`
-  fields are never altered.
+  fields are never altered. `verify` extends the report `project` wrote and
+  `propose` reads its `verify` block — pass the **same** `--report` to
+  `project`, `verify` and `propose`, or omit it on all three so the defaults
+  match; a mismatch fails `propose` with `projection report verdict is
+  undefined` (exit `20`).
 
 Exit codes: `0` all gates pass (and the baseline matches when actually run) ·
 `20` gate failure, pack-content violation, or baseline mismatch ·
@@ -225,13 +230,13 @@ one before it:
 verity release prepare --apply            # commit the CHANGELOG edit via review as usual
 
 # 2. In DEV: build the projection from the release-candidate ref
-verity promotion project <ref> --out <staging>
+verity promotion project <ref> --out <staging> --report <staging>.report.json
 
 # 3. In DEV: prove the projection is a working product
-verity promotion verify <staging>         # add --baseline <ver> + env flag for the byte-match lane
+verity promotion verify <staging> --report <staging>.report.json   # add --baseline <ver> + env flag for the byte-match lane
 
 # 4. In DEV: open the promotion PR in prod (both provenance records written)
-verity promotion propose <version> --staging <staging>
+verity promotion propose <version> --staging <staging> --report <staging>.report.json
 
 # 5. In PROD: review and merge the promotion PR (human/reviewer authority —
 #    no verity verb does this)
@@ -246,6 +251,12 @@ verity promotion finalize <version>
 
 Steps 1–4 and 6 are deterministic CLI verbs; steps 5 and 7 are deliberate
 human gates at the only irreversible moments.
+
+Steps 2–4 share **one report path**. `verify` extends the report `project`
+wrote and `propose` reads its `verify` block — pass the **same** `--report` to
+all three, or omit it on all three so the defaults (`<staging>.report.json`)
+match; a mismatch fails `propose` with `projection report verdict is undefined`
+(exit `20`).
 
 Once the dev/prod split is active, the dev-side release computation is
 `verity release prepare`:
@@ -302,10 +313,51 @@ vision → architect → plan → build → review → test → security → doc
 ```
 
 `/verity:map` and `/verity:revisit` are available at any point. You don't have to run every role on every
-project — Verity tracks dependencies, so `/verity:next` (and each role on completion)
-points you at what can run next. `/verity:deploy-setup` (where your apps ship) and
+project — Verity tracks dependencies, so `verity state next` (the unblocked stages) and
+each role on completion point you at what can run next. `/verity:deploy-setup` (where your apps ship) and
 `/verity:autonomy-setup` (how the worker runs) are one-time (or when-things-change)
 setup helpers, run independently of any single project's lifecycle.
+
+## CLI verbs
+
+The deterministic `verity` CLI underneath the roles, one line per verb in
+`verity help` order. This is an index, not a reference — follow the link for
+flags and detail where a fuller section exists. Every verb takes `--raw`
+(plain value) and `--cwd <dir>` (target another project).
+
+- `verity slug` — turn a name into a project slug (`--raw` prints it bare). *Internal (used by roles and tests).*
+- `verity timestamp` — print the current ISO-8601 UTC timestamp. *Internal (a carried utility, exercised by tests).*
+- `verity verify-path` — report whether a path exists (`true`/`false` with `--raw`). *Internal (a carried utility, exercised by tests).*
+- `verity config` — `ensure` / `get` / `set` the project's `.verity/config.json` knobs.
+- `verity identity` — `check` / `lock` / `get` the identity manifest (`.verity/identity.json`); the slug locks once. See [Design](#design).
+- `verity scaffold` — `init` generates a repo's governance and hygiene-CI files from the locked identity. See [Design](#design). The scaffolded CI `structure` job also fails when bytecode or tool caches (`__pycache__/`, `*.pyc`, `*.class`, `node_modules/`, …) are tracked, and names the offending paths.
+- `verity install` — install the role commands into an assistant host (`--claude`, `--opencode`, `--codex`), or `--actions` to scaffold the worker workflow. See [Install](../README.md#install).
+- `verity adr` — `new` / `list` the numbered, append-only ADRs under `docs/adr/`. See [Design](#design).
+- `verity contract` — `new` / `list` interface contracts under `contracts/`; `new` never overwrites a frozen one. See [Design](#design).
+- `verity guides` — `list` / `show` the shipped design guides the Architect reviews. *Internal (used by roles and tests).*
+- `verity feature` — `list` / `show` the drop-in feature catalog the Architect can offer. See [Design](#design).
+- `verity stage` — `new` / `list` / `branch` / `pr` for stage specs under `stage-instructions/`. See [Plan & Build](#plan--build).
+- `verity state` — derive integration state from stage specs + GitHub (`view` / `next` / `stage` / `summary` / `graph`); never writes state. See [Unreadable state](autonomy.md#unreadable-state).
+- `verity next` — the autonomy dispatch decision (work, gated or idle); `--json` is pipe-safe and a gate exits `10`. See [What autonomy is](autonomy.md#what-autonomy-is).
+- `verity autonomy` — `show` / `set` / `validate` the autonomy policy in `.verity/autonomy.yml`. See [Modes](autonomy.md#modes).
+- `verity agent-exec` — run one role headlessly, the only place an AI agent is invoked (exit `0` / `10` / `20` / `30`). See [Host matrix](../README.md#host-matrix).
+- `verity usage` — roll up `.verity/usage.csv` over the last `--days N` (runs, tokens, est. USD, outcomes). See [Usage & cost tracking](autonomy.md#usage--cost-tracking).
+- `verity review` — `checklist` for a stage's PR, and `merge`, which refuses on red CI. See [Plan & Build](#plan--build).
+- `verity release` — `current` / `changelog` / `cut` / `prepare`: the version derived from tags (or promotion records once split) and a Conventional-Commits changelog. See [the release runbook](#the-end-to-end-release-runbook-dev--prod).
+- `verity status` — `show` / `set` / `note` / `secret` / `render` the runtime-truth store (`.verity/runtime.json`) and its `STATUS.md` rendering. `status secret --none "<reason>"` records that no secret location applies (`n/a: <reason>`; reason of at least 10 characters; refused alongside a real location). See [Release & Operate](#release--operate).
+- `verity security` — `init` / `show` the security invariants (`docs/security-invariants.md`) the Reviewer enforces. See [Quality Gates](#quality-gates).
+- `verity handoff` — `new` / `list` / `readme` for handoff briefs under `docs/handoff/`. See [Quality Gates](#quality-gates).
+- `verity map` — generate the code-structure diagram into `codebase-map.md`. See [Any time](#any-time).
+- `verity recovery` — `init` / `show` the SRE's `recovery-plan.md`. See [Release & Operate](#release--operate).
+- `verity golive` — run the pre-go-live checklist: the derivable auto-checks plus the five manual gates and their recorded answers; `ready` only when the auto-checks pass and every gate is answered. `golive confirm <id> --by <who> [--na "<reason>"]` records an `ok` or `n/a` answer (named, reason of at least 10 characters for `n/a`) in `.verity/runtime.json` and `STATUS.md`; `golive reset <id>` withdraws it. See [Release & Operate](#release--operate).
+- `verity smoke` — `init` / `run` the UI-smoke gate against the real UI; with no headless browser it degrades to a non-pass. See [Release & Operate](#release--operate).
+- `verity deployment` — `list` / `show` / `path` / `ensure` / `edit` the global deployment-methods catalog, plus `init-access` / `access` for a project's `.verity/deploy-access.md`. See [Deployment methods](../README.md#deployment-methods).
+- `verity promotion` — `project` / `verify` / `propose` / `finalize`: the dev→prod projection and promotion. See [Promotion](#promotion-devprod-projection).
+- `verity doctor` — check host dependencies (git, gh + auth, the agent runtime); `--quiet` reports by exit code only. See [Install](../README.md#install).
+- `verity operator` — read-only operator projections (`snapshot` / `work` / `gates` / `runs` / `run` / `policy` / `usage` / `diagnostics`) plus the `act` write verb. See the [operator-snapshot contract](../contracts/operator-snapshot.md).
+- `verity benchmark` — `provision` / `run` the opt-in benchmark harness; inert without an enabled `benchmark.json`.
+- `verity gates` — `run` the committed `.verity/gates.json` gates against the branch head, judged by exit code only. See [Local substrate gates](autonomy.md#local-substrate-gates-veritygatesjson).
+- `verity gate-runners` — `list` / `show` / `path` / `ensure` / `edit` the global `~/.verity/gate-runners.md` catalog of remote gate hosts. See [Local substrate & gate runners](../README.md#local-substrate--gate-runners-new-in-130).
 
 ## See also
 

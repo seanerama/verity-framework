@@ -30,6 +30,32 @@ object (no code fence on that line), shaped like:
 </headless-result-contract>
 `;
 
+// Deliver a role's positional arguments into its rendered prompt (stage 103,
+// canary finding F-B). Both headless drivers call this BEFORE appending the
+// RESULT_CONTRACT footer, so the footer stays the last block of every prompt.
+//   1. args are joined with a single space;
+//   2. if the text carries any of `placeholders`, every occurrence is
+//      substituted in the given order (literal substitution — no replacement
+//      patterns) and nothing else is added: never double-delivered;
+//   3. otherwise, non-empty args are appended as an `ARGUMENTS: <args>` line —
+//      the exact convention Claude Code uses for a slash-command body with no
+//      $ARGUMENTS placeholder, so a role reads the same headless as interactive;
+//   4. otherwise (no args) the text is returned untouched — byte-identical.
+function applyRoleArgs(text, roleArgs, { placeholders }) {
+  const args = roleArgs.join(' ');
+  if (placeholders.some((p) => text.includes(p))) {
+    let out = text;
+    for (const p of placeholders) {
+      out = out.split(p).join(args);
+    }
+    return out;
+  }
+  if (args !== '') {
+    return `${text.trimEnd()}\n\nARGUMENTS: ${args}\n`;
+  }
+  return text;
+}
+
 class AgentExecError extends Error {
   constructor(message, slug) {
     super(message);
@@ -166,6 +192,7 @@ module.exports = {
   RESULT_CONTRACT,
   ROLE_OUTCOMES,
   SCHEMA,
+  applyRoleArgs,
   buildResult,
   exitCodeFor,
   extractMarker,

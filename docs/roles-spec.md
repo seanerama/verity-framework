@@ -39,6 +39,36 @@ Only arc ① is linear and runs once. Arc ② is the bulk (feature-stage loop ov
 
 ---
 
+## Spec role → packaged command (1.4.0)
+
+> The ROLE MAP above and the numbered **Roles 1–14** below are **as of 2026-06-07
+> (design)** — kept as history, not renumbered (ADRs cite roles by these numbers).
+> This table maps each spec role onto what actually ships in
+> `commands/verity/` today; see the [command reference](commands.md) for what each
+> command does.
+
+| Spec role (2026-06-07 design) | Packaged command (1.4.0) |
+| --- | --- |
+| Role 1 — Vision Assistant | `/verity:vision` |
+| Role 2 — Architect | `/verity:architect` |
+| Role 3 — UI/UX Designer | no command; see #92 |
+| Role 4 — Intake/Planner | `/verity:plan` |
+| Role 5 — Stage Manager (+ Stage Executor sub-agent) | `/verity:build` |
+| Role 6 — Reviewer/Integrator | `/verity:review` |
+| Role 7 — Release/Deploy Operator | `/verity:ship` |
+| Role 8 — Project Tester | `/verity:test` |
+| Role 9 — Handoff Tester | `/verity:verify` |
+| Role 10 — SRE | `/verity:sre` |
+| Role 11 — Retrofit Planner | `/verity:revisit` — proposal-only: it locks no identity, freezes no contracts and scaffolds nothing (its only write is a dated report); the spine work flows through `plan` and `build` (ADR-0032) |
+| Role 12 — Security Auditor | `/verity:security` |
+| Role 13 — Technical Writer | `/verity:docs` |
+| Role 14 — Codebase Mapper | `/verity:map` |
+| *(no spec role — the spec's "Gate — Pre-go-live / first-real-data", not a numbered role)* | `/verity:golive` — the pre-go-live gate |
+| *(no spec role)* | `/verity:deploy-setup` — Deployment Methods: builds the global deployment-methods catalog |
+| *(no spec role)* | `/verity:autonomy-setup` — Autonomy Deployment: generates the autonomy-worker deployment |
+
+---
+
 ## Cross-cutting asset — Standard feature catalog (drop-in features)
 - **Definition:** a drop-in feature = a pre-packaged **stage-set** + the **architectural prerequisites** it imposes. *Offered, not mandated* (same philosophy as design guides).
 - **Location:** `design-guides/features/` (sibling to the guides). Ships **sample specs**; org overrides/extends via config (bring-your-own, same model as guides). A **catalog index** lists available features; **one spec file per feature**.

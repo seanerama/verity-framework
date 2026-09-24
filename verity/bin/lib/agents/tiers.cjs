@@ -33,6 +33,10 @@
 // evidence of the runtime's real enforcement behavior (ADR-0031 §6).
 const { AgentExecError } = require('./result-contract.cjs');
 
+// Object.hasOwn needs Node 16.9 and engines allows 16.7, so own-key checks call
+// the prototype method through this reference (Biome 2 flags the inline form).
+const hasOwn = Object.prototype.hasOwnProperty;
+
 // Entry fields are named for what they MEAN, never for the provider they
 // happen to describe today:
 //
@@ -82,9 +86,7 @@ function getTier(providerId) {
   if (typeof providerId !== 'string') {
     return null;
   }
-  return Object.prototype.hasOwnProperty.call(TRUST_TABLE, providerId)
-    ? TRUST_TABLE[providerId]
-    : null;
+  return hasOwn.call(TRUST_TABLE, providerId) ? TRUST_TABLE[providerId] : null;
 }
 
 // The refusal text. The WORDING is load-bearing: it must read as "this provider

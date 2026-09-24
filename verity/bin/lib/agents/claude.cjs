@@ -7,7 +7,8 @@
 // agent-exec.cjs stays a runtime-neutral coordinator and calls this driver
 // through the ./index.cjs registry.
 //
-// Invocation shape (flag spellings verified against Claude Code 2.1.170 — see
+// Invocation shape (flag spellings verified against Claude Code 2.1.170 on
+// 2026-06-10, re-verified against 2.1.281 on 2026-09-24 — see
 // docs/dev/autonomy-pathmap.md "Claude Code headless interface"):
 //   claude -p "<rendered prompt>" --output-format stream-json --verbose
 //     --max-turns N --allowed-tools <each entry verbatim>
@@ -25,7 +26,7 @@ const { checkBinary } = require('../doctor.cjs');
 // carry the same preambles as installed files — one system, never two copies.
 const { renderRole } = require('../install.cjs');
 
-const { AgentExecError, RESULT_CONTRACT, extractMarker, isPlainObject } =
+const { AgentExecError, RESULT_CONTRACT, applyRoleArgs, extractMarker, isPlainObject } =
   require('./result-contract.cjs');
 
 // Version floor from the IN-SUBTREE engine-meta.json (stage 35), not a top-level
@@ -172,13 +173,16 @@ function transcriptFilename(role) {
 // Render the role command file the way Claude Code would run it as a slash
 // command: pass it through the install-time pipeline (preamble injection is
 // idempotent, so source files and already-installed copies both work), strip
-// the YAML frontmatter, substitute $ARGUMENTS (the only placeholder the role
-// files use), then append the headless result contract — the one block that
-// stays headless-only by design (no human is present to fill the gap).
+// the YAML frontmatter, deliver the role args (substitute $ARGUMENTS — the only
+// placeholder the role files use — or, for a role without it, append an
+// `ARGUMENTS: <args>` line exactly as Claude Code does for a slash command;
+// stage 103, shared applyRoleArgs), then append the headless result contract —
+// the one block that stays headless-only by design (no human is present to fill
+// the gap).
 function renderPrompt(file, roleArgs) {
   let text = renderRole(file, {}, 'claude');
   text = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '');
-  text = text.replace(/\$ARGUMENTS/g, roleArgs.join(' '));
+  text = applyRoleArgs(text, roleArgs, { placeholders: ['$ARGUMENTS'] });
   return `${text.trimEnd()}\n${RESULT_CONTRACT}`;
 }
 

@@ -20,9 +20,14 @@ function runtimePath(cwd) {
   return path.join(cwd, '.verity', 'runtime.json');
 }
 
+// A fresh copy of DEFAULTS per read: a shallow spread would share the default
+// arrays, so an `append` on a repo with no runtime.json would mutate DEFAULTS
+// itself and leak into every later read in the same process (stage 107).
 function read(cwd) {
   const p = runtimePath(cwd);
-  return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : { ...DEFAULTS };
+  return fs.existsSync(p)
+    ? JSON.parse(fs.readFileSync(p, 'utf8'))
+    : JSON.parse(JSON.stringify(DEFAULTS));
 }
 
 function write(cwd, data) {
@@ -63,6 +68,12 @@ function render(cwd, data) {
       data.secret_locations,
     ),
     ...section('Coordination notes', data.notes),
+    // Stage 107: the go-live gate dispositions, rendered only when the optional
+    // `golive` key exists — a runtime.json without it renders byte-identically to
+    // before. Required lazily: golive.cjs requires this module at load time.
+    ...(data.golive && typeof data.golive === 'object'
+      ? require('./golive.cjs').statusSection(data.golive)
+      : []),
   ];
   fs.writeFileSync(path.join(cwd, 'STATUS.md'), `${lines.join('\n').trim()}\n`);
 }
@@ -92,6 +103,52 @@ function append(cwd, listField, value) {
   return { field: listField, count: list.length };
 }
 
+// Stage 107: the explicit not-applicable form for secret locations. A project
+// with no deploy host and no stored secrets records `n/a: <reason>` instead of a
+// location that does not exist. The array stays an array of strings.
+const NA_PREFIX = 'n/a:';
+const MIN_REASON = 10;
+
+function isNotApplicable(entry) {
+  return typeof entry === 'string' && entry.startsWith(NA_PREFIX);
+}
+
+// `verity status secret "<NAME> @ <loc>"` (unchanged) or
+// `verity status secret --none "<reason>"`. Locations and an n/a are mutually
+// exclusive: a project cannot both record where its secrets live and declare it
+// has none, so either order is refused.
+function secret(cwd, args, flags) {
+  const existing = read(cwd).secret_locations;
+  const list = Array.isArray(existing) ? existing : [];
+  if (flags.none === undefined) {
+    const na = list.find(isNotApplicable);
+    if (na !== undefined) {
+      throw new Error(
+        `status secret refused: secret locations are already declared not applicable (${JSON.stringify(na)}) — a project cannot both record locations and declare none`,
+      );
+    }
+    return append(cwd, 'secret_locations', args.join(' '));
+  }
+  if (args.length > 0) {
+    throw new Error(
+      'status secret --none takes one quoted reason and no location — a project cannot both record locations and declare none',
+    );
+  }
+  const reason = typeof flags.none === 'string' ? flags.none.trim() : '';
+  if (reason.length < MIN_REASON) {
+    throw new Error(
+      `status secret --none needs a reason of at least ${MIN_REASON} characters saying why no secret location applies (got ${JSON.stringify(reason)})`,
+    );
+  }
+  const located = list.find((e) => !isNotApplicable(e));
+  if (located !== undefined) {
+    throw new Error(
+      `status secret --none refused: a secret location is already recorded (${JSON.stringify(located)}) — a project cannot both record locations and declare none`,
+    );
+  }
+  return append(cwd, 'secret_locations', `${NA_PREFIX} ${reason}`);
+}
+
 function dispatch(args, flags) {
   const cwd = flags.cwd || process.cwd();
   const verb = args[0] || 'show';
@@ -105,7 +162,7 @@ function dispatch(args, flags) {
     return append(cwd, 'notes', args.slice(1).join(' '));
   }
   if (verb === 'secret') {
-    return append(cwd, 'secret_locations', args.slice(1).join(' '));
+    return secret(cwd, args.slice(1), flags);
   }
   if (verb === 'render') {
     render(cwd, read(cwd));
@@ -118,4 +175,18 @@ function dispatch(args, flags) {
 // from one read — `promotion finalize` stamping version/deployed_at/
 // rollback_from together — can do it as a single write + single render, rather
 // than three `set` round-trips that each re-read and re-render.
-module.exports = { DEFAULTS, runtimePath, read, write, render, show, set, append, dispatch };
+module.exports = {
+  DEFAULTS,
+  NA_PREFIX,
+  MIN_REASON,
+  isNotApplicable,
+  runtimePath,
+  read,
+  write,
+  render,
+  show,
+  set,
+  append,
+  secret,
+  dispatch,
+};

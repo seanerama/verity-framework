@@ -31,7 +31,8 @@ a bug before filing it, to verify a fix landed, or just to poke at the engine.
 
 ## Prerequisites
 
-- **Node.js ≥ 16.7**
+- **Node.js ≥ 16.7** to run Verity; **≥ 18 to run the test suite** (four test files
+  use `structuredClone`, which Node 16 lacks)
 - **git** and the **GitHub CLI** (`gh`) — Verity is GitHub-native, and several
   roles shell out to `gh` at runtime.
 
@@ -102,13 +103,41 @@ No `require` of the runner, no imports of a framework — just call `test(...)`.
 
 ### Lint & format
 
-Biome enforces 2-space indentation, single quotes, and a 100-character line width.
-`docs/**`, all `*.md` files, and `verity/templates/**` are intentionally ignored
+Biome (pinned exactly, currently 2.5.14) enforces 2-space indentation, single
+quotes, and a 100-character line width, plus the `recommended` rule preset.
+`docs/`, all `*.md` files, and `verity/templates/` are intentionally ignored
 (see `biome.json`). To auto-fix locally:
 
 ```bash
 npx biome check --write .
 ```
+
+- **Warnings fail the gate.** Biome 2 reports most recommended rules as warnings,
+  and `biome ci` exits 0 on warnings. `npm run lint` is
+  `biome ci --error-on-warnings .`, so a warning or an error fails CI,
+  `promotion verify`, and `prepublishOnly`. `info` diagnostics still do not fail it.
+- **1.9.4 parity rules are set to `"error"`.** The 2.x preset dropped several plain-JS
+  rules that 1.9.4 enforced (`noVar`, `noForEach`, `noParameterAssign`, …) and
+  moved others down to `info` (`useTemplate`, `useNodejsImportProtocol`, …).
+  `biome.json` sets each of them to `"error"` in its 2.x group, so the gate is as
+  strict as it was on 1.9.4. TypeScript- and JSX-only rules are left out, because
+  they cannot fire on this CommonJS tree.
+- **Two rules are off, on purpose.**
+  - `suspicious/noTemplateCurlyInString`: every hit was a literal GitHub Actions
+    expression such as `${{ github.ref }}` that `install.cjs` writes into workflow
+    files and the tests assert on. Those strings are meant to contain `${{ }}`.
+  - `performance/noDelete`: 2.x dropped it from the preset. The `delete`
+    statements in the tree restore environment variables (and one test hook) to
+    truly absent, because assigning `undefined` would set an env var to the
+    string `"undefined"`.
+
+  Any other opt-out needs its own review.
+- **Never commit `npx biome migrate --write` output without reading it.** On the
+  1.x config it rewrote `"rules": { "recommended": true }` to
+  `"rules": { "preset": "none" }`, which disables every lint rule while CI stays
+  green. `tests/lint-config.test.cjs` pins `preset: "recommended"`, the parity
+  rules at `"error"`, the two opt-outs, and the `--error-on-warnings` flag. After an upgrade, `npx biome migrate` (without
+  `--write`) should report that no migration is needed.
 
 ## Project layout
 

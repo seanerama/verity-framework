@@ -42,6 +42,30 @@ jobs:
             test -f "$f" || { echo "missing required file: $f"; exit 1; }
           done
           echo "structure ok"
+      # Bytecode and tool caches must never be tracked, whatever .gitignore
+      # says (issue #178: a first PR committed __pycache__/*.pyc and CI stayed
+      # green). A fixed deny-list, NOT a mirror of .gitignore: a project may
+      # track dist/ or build/ on purpose. `git ls-files -z` gives raw paths
+      # (unquoted, even with spaces, tabs or non-ASCII names); `tr` turns the
+      # NULs into newlines so plain POSIX `grep -E` can read them. That can
+      # only ADD line boundaries, and every pattern is anchored to the end of a
+      # path or a `/`-bounded directory name, so nothing is missed. Judged by
+      # exit code (ADR-0028): grep 0 = offending paths (printed, fail),
+      # 1 = clean, anything else = the scan itself failed (fail closed).
+      - name: Tracked build artifacts absent
+        run: |
+          tracked=$(mktemp)
+          git ls-files -z > "$tracked" || { echo "git ls-files failed"; exit 1; }
+          rc=0
+          bad=$(tr '\0' '\n' < "$tracked" | grep -E '(^|/)(__pycache__|\.pytest_cache|node_modules)/|\.(pyc|pyo|class)$|(^|/)\.DS_Store$|\.egg-info/') || rc=$?
+          rm -f "$tracked"
+          if [ "$rc" -eq 0 ]; then
+            echo "tracked build artifacts (git rm --cached them and add them to .gitignore):"
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+          [ "$rc" -eq 1 ] || { echo "tracked-artifact scan failed (grep exit $rc)"; exit 1; }
+          echo "structure ok"
   secret-scan:
     runs-on: ubuntu-latest
     steps:

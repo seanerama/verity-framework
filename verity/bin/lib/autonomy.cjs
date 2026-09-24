@@ -38,6 +38,10 @@ const adr = require('./adr.cjs');
 // unchanged.
 const tiers = require('./agents/tiers.cjs');
 
+// Object.hasOwn needs Node 16.9 and engines allows 16.7, so own-key checks call
+// the prototype method through this reference (Biome 2 flags the inline form).
+const hasOwn = Object.prototype.hasOwnProperty;
+
 class PolicyError extends Error {
   constructor(message, opts = {}) {
     super(opts.line === undefined ? message : `${message} (line ${opts.line})`);
@@ -295,7 +299,7 @@ function parseYaml(text) {
     if (rest !== '' && !rest.startsWith(' ')) {
       throw new PolicyError('missing space after `:`', { line });
     }
-    if (Object.prototype.hasOwnProperty.call(top.node, key)) {
+    if (hasOwn.call(top.node, key)) {
       throw new PolicyError(`duplicate key: ${key}`, { line });
     }
     const value = rest.trim();
@@ -977,7 +981,7 @@ function writeUserPolicy(cwd, data) {
 function specAt(dotted) {
   let node = { type: 'map', keys: SPEC };
   for (const part of dotted.split('.')) {
-    if (node.type !== 'map' || !Object.prototype.hasOwnProperty.call(node.keys, part)) {
+    if (node.type !== 'map' || !hasOwn.call(node.keys, part)) {
       return null;
     }
     node = node.keys[part];

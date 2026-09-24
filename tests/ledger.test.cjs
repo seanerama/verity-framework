@@ -100,8 +100,6 @@ test('ledger never writes a state file (read-only derivation)', () => {
 
 // --- Stage 68 (ADR-0027): fetchSnapshot stamps the registration timestamp -----
 
-const { execFileSync } = require('node:child_process');
-
 // A fake `gh` first on PATH that REQUIRES `createdAt` in the `pr list` --json
 // field set (so the test proves the field is actually requested) and returns a
 // PR carrying it. Run fetchSnapshot with this stub via PATH.

@@ -1,14 +1,15 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
   "files": {
-    "ignore": [
-      "node_modules",
-      "dist",
-      "package-lock.json",
-      "docs/**",
-      "**/*.md",
-      "verity/templates/**"
+    "includes": [
+      "**",
+      "!**/node_modules",
+      "!**/dist",
+      "!**/package-lock.json",
+      "!**/docs",
+      "!**/*.md",
+      "!**/verity/templates"
     ]
   },
   "formatter": {
@@ -19,7 +20,50 @@
   },
   "linter": {
     "enabled": true,
-    "rules": { "recommended": true }
+    "rules": {
+      "preset": "recommended",
+      "complexity": {
+        "noArguments": "error",
+        "noCommaOperator": "error",
+        "noForEach": "error",
+        "useLiteralKeys": "error",
+        "noExcessiveNestedTestSuites": "error",
+        "noExtraBooleanCast": "error",
+        "noFlatMapIdentity": "error",
+        "noUselessCatch": "error",
+        "noUselessConstructor": "error",
+        "noUselessContinue": "error",
+        "noUselessEmptyExport": "error",
+        "noUselessLabel": "error",
+        "noUselessLoneBlockStatements": "error",
+        "noUselessRename": "error",
+        "noUselessSwitchCase": "error",
+        "noUselessTernary": "error",
+        "noUselessThisAlias": "error",
+        "useFlatMap": "error",
+        "useWhile": "error"
+      },
+      "style": {
+        "noParameterAssign": "error",
+        "noUselessElse": "error",
+        "useTemplate": "error",
+        "useConst": "error",
+        "useNumberNamespace": "error",
+        "useExponentiationOperator": "error",
+        "useSingleVarDeclarator": "error",
+        "useDefaultParameterLast": "error",
+        "useNodejsImportProtocol": "error",
+        "noUnusedTemplateLiteral": "error"
+      },
+      "suspicious": {
+        "noVar": "error",
+        "noDuplicateTestHooks": "error",
+        "noExportsInTest": "error",
+        "noFocusedTests": "error",
+        "noTemplateCurlyInString": "off"
+      },
+      "performance": { "noDelete": "off" }
+    }
   },
   "javascript": {
     "formatter": { "quoteStyle": "single" }

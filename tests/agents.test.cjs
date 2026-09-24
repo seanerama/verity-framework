@@ -544,3 +544,81 @@ test('seam: agent-exec module.exports surface is intact (worker/test compatibili
   assertEqual(agentExec.renderPrompt, claude.renderPrompt, 're-export, not a copy');
   assertEqual(agentExec.MIN_CLAUDE_VERSION, claude.MIN_CLAUDE_VERSION, 'same pin');
 });
+
+// ---------------------------------------------------------------------------
+// Stage 103 (canary finding F-B, #271): positional role arguments are never
+// silently dropped. A role without $ARGUMENTS gets an appended
+// `ARGUMENTS: <args>` line (Claude Code's own slash-command convention), placed
+// BEFORE the RESULT_CONTRACT footer; a role with the placeholder gets
+// substitution only; empty args render byte-identically to before.
+// ---------------------------------------------------------------------------
+const install = require('../verity/bin/lib/install.cjs');
+const { RESULT_CONTRACT, applyRoleArgs } = require('../verity/bin/lib/agents/result-contract.cjs');
+
+const ROLES_DIR_103 = path.join(__dirname, '..', 'commands', 'verity');
+const SENTINEL_103 = 'ZZ-SENTINEL-42';
+const CONTRACT_HEAD_103 = RESULT_CONTRACT.trim().split('\n')[0];
+
+test('stage 103: claude plan.md with args shows them to the model, before the result contract (F-B)', () => {
+  const prompt = claude.renderPrompt(path.join(ROLES_DIR_103, 'plan.md'), [SENTINEL_103]);
+  const line = `\n\nARGUMENTS: ${SENTINEL_103}\n`;
+  assert(prompt.includes(line), 'plan.md prompt carries the appended ARGUMENTS line');
+  const at = prompt.indexOf(line);
+  const contractAt = prompt.indexOf(CONTRACT_HEAD_103);
+  assert(contractAt > -1, 'result contract present');
+  assert(at < contractAt, 'ARGUMENTS line lands before the result contract');
+  assert(prompt.endsWith(RESULT_CONTRACT), 'result contract stays the last block');
+});
+
+test('stage 103: claude build.md with args is substituted only — never double-delivered', () => {
+  const prompt = claude.renderPrompt(path.join(ROLES_DIR_103, 'build.md'), ['7']);
+  assert(!prompt.includes('$ARGUMENTS'), '$ARGUMENTS substituted');
+  assert(!prompt.includes('\nARGUMENTS:'), 'no appended ARGUMENTS line on a placeholder role');
+});
+
+test('stage 103: claude plan.md with no args renders byte-identically to the pre-fix shape', () => {
+  const file = path.join(ROLES_DIR_103, 'plan.md');
+  const prompt = claude.renderPrompt(file, []);
+  assert(!prompt.includes('ARGUMENTS:'), 'no ARGUMENTS line without args');
+  assert(prompt.endsWith(RESULT_CONTRACT), 'ends with the result contract');
+  // The pre-stage-103 render, reconstructed: plan.md has no placeholder, so the
+  // old `$ARGUMENTS` replace was a no-op.
+  const before = install
+    .renderRole(file, {}, 'claude')
+    .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
+    .trimEnd();
+  assertEqual(prompt, `${before}\n${RESULT_CONTRACT}`, 'byte-identical to the pre-fix render');
+});
+
+test('stage 103: claude sweep — every packaged role delivers its args, never drops or doubles them', () => {
+  const roles = fs.readdirSync(ROLES_DIR_103).filter((n) => n.endsWith('.md'));
+  assert(roles.length >= 16, 'sweep covers every packaged role');
+  for (const name of roles) {
+    const file = path.join(ROLES_DIR_103, name);
+    const body = fs.readFileSync(file, 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '');
+    const placeholders = body.split('$ARGUMENTS').length - 1;
+    const prompt = claude.renderPrompt(file, [SENTINEL_103]);
+    const seen = prompt.split(SENTINEL_103).length - 1;
+    const appended = prompt.includes(`\nARGUMENTS: ${SENTINEL_103}\n`);
+    if (placeholders === 0) {
+      assertEqual(seen, 1, `${name}: sentinel appears exactly once (appended line)`);
+      assert(appended, `${name}: delivered via the appended ARGUMENTS line`);
+    } else {
+      assertEqual(seen, placeholders, `${name}: sentinel fills each placeholder, nothing more`);
+      assert(!appended, `${name}: placeholder role gets no appended line`);
+    }
+    assert(prompt.endsWith(RESULT_CONTRACT), `${name}: result contract stays last`);
+  }
+});
+
+test('stage 103: applyRoleArgs substitutes literally, appends only when needed, else no-op', () => {
+  const ph = { placeholders: ['$ARGUMENTS'] };
+  assertEqual(applyRoleArgs('Do $ARGUMENTS now\n', ['$&', 'x'], ph), 'Do $& x now\n', 'literal');
+  assertEqual(applyRoleArgs('Body text\n\n', ['a', 'b'], ph), 'Body text\n\nARGUMENTS: a b\n');
+  assertEqual(applyRoleArgs('Body text\n\n', [], ph), 'Body text\n\n', 'empty args untouched');
+  assertEqual(
+    applyRoleArgs('A <p> B $ARGUMENTS', ['9'], { placeholders: ['<p>', '$ARGUMENTS'] }),
+    'A 9 B 9',
+    'every placeholder substituted, in order',
+  );
+});

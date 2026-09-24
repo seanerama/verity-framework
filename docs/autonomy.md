@@ -145,10 +145,10 @@ continues. At trust 0 a `review:merge` gate still ends with a human pressing the
 merge button — the approval label resumes the worker, it does not grant merge
 authority.
 
-> The gate comment also offers `/verity approve`. In v1 **the label is the only
-> approval token the worker honors** — under the Actions driver a comment
-> *wakes* the worker promptly (the workflow triggers on `issue_comment`), but
-> nothing yet translates the comment text into an approval. Use the label.
+> In v1 **the label is the only approval token the worker honors** — under the
+> Actions driver a comment *wakes* the worker promptly (the workflow triggers on
+> `issue_comment`), but nothing yet translates the comment text into an
+> approval. Use the label.
 
 ## Running it: cron recipe
 
@@ -433,8 +433,8 @@ on CI that nobody ever ran. Every consumer of the reading decides explicitly:
 So on a repository with no CI the chain runs `plan → build`, opens the PR, and
 then **stops for a human** at gate `ci:unverified`: Verity cannot claim the
 stage is green, so it does not pretend either way. Approving the gate
-(`verity:approved`, or `/verity approve`) consents for that one run — the stage
-advances to `review`, and the merge itself is still gated, because merging
+(`verity:approved`) consents for that one run — the stage advances to
+`review`, and the merge itself is still gated, because merging
 requires a *verified* green reading that an unchecked PR can never produce.
 
 ### Registration grace (a just-opened PR is not a no-CI repo)

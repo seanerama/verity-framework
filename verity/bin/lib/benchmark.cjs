@@ -712,7 +712,15 @@ function provision(fixtureId, opts = {}) {
     }
     return res.stdout || '';
   };
-  const labelResult = ensureLabels(repoDir, labelRun);
+  // Stage 105 (#172): right after `gh repo create`, `gh label list` can answer
+  // an EMPTY body with exit 0; ensureLabels now re-reads it (bounded) instead
+  // of failing here, and on exhaustion its error text lands in the step reason
+  // below. The same injectable sleep the run half uses keeps tests sleep-free.
+  const labelResult = ensureLabels(
+    repoDir,
+    labelRun,
+    typeof opts.sleep === 'function' ? { sleep: opts.sleep } : {},
+  );
   if (labelResult && labelResult.ok === false) {
     const why = labelResult.error || labelResult.failed?.[0]?.error || '';
     return {
@@ -1136,9 +1144,12 @@ function run(opts = {}) {
         spawn,
         cwd: opts.cwd,
         workdir: opts.workdir,
+        // Stage 105: forwarded so provision's label-list re-read (ensureLabels)
+        // shares the run's injectable sleep (a no-op in tests).
+        sleep: opts.sleep,
       });
       manifest.push(entry);
-      if (!entry || !entry.ok) {
+      if (!entry?.ok) {
         results.push({
           run_id: `${fixture}-run${i + 1}`,
           fixture,
