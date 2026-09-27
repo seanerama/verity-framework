@@ -199,7 +199,10 @@ test('characterize: version below pin → 30, slug version-too-old, names pin + 
 
 // --- argv order (verified Claude headless flag spellings) ---
 
-test('characterize: exact argv order; variadic --allowed-tools is the LAST flag', () => {
+// Stage 109 deliberately moved the tail: --allowed-tools is now SECOND to last
+// and the fixed --disallowed-tools deny list is the final flag (both variadic;
+// each stays last-of-its-kind so neither swallows another arg).
+test('characterize: exact argv order; variadic --allowed-tools then the --disallowed-tools deny list LAST', () => {
   const fx = fixture();
   canned(fx, MARKER_SUCCESS);
   echoRole(fx);
@@ -214,11 +217,19 @@ test('characterize: exact argv order; variadic --allowed-tools is the LAST flag'
     'fixed flag order, default --max-turns 80 (stage 74)',
   );
   assertEqual(argv[7], '--allowed-tools', '--allowed-tools directly after --max-turns');
+  const deny = 8 + ECHO_TOOLS.length;
   assertEqual(
-    JSON.stringify(argv.slice(8)),
+    JSON.stringify(argv.slice(8, deny)),
     JSON.stringify(ECHO_TOOLS),
-    'allowlist entries verbatim, running to the end of argv',
+    'allowlist entries verbatim, running up to the deny flag',
   );
+  assertEqual(argv[deny], '--disallowed-tools', '--disallowed-tools directly after the allowlist');
+  assertEqual(
+    JSON.stringify(argv.slice(deny + 1)),
+    JSON.stringify(['Agent', 'Task', 'ScheduleWakeup', 'Workflow']),
+    'deny list verbatim, running to the end of argv',
+  );
+  assertEqual(argv.length, deny + 5, 'nothing after the deny list');
 });
 
 test('characterize: --max-turns N passes through to the agent argv', () => {
@@ -621,4 +632,135 @@ test('stage 103: applyRoleArgs substitutes literally, appends only when needed, 
     'A 9 B 9',
     'every placeholder substituted, in order',
   );
+});
+
+// ---------------------------------------------------------------------------
+// Stage 109 (benchmark a-20260925-160754-run1 tick 1): headless roles cannot
+// delegate. --allowed-tools only pre-approves prompting tools, so Agent/Task/
+// ScheduleWakeup/Workflow ran whether listed or not; --disallowed-tools is the
+// only mechanism that removes them. Pinned on the spawn args of real packaged
+// roles, the allowlist loader refuses a contradicting entry, and the headless
+// contract states the denial so the build role never probes for it.
+// ---------------------------------------------------------------------------
+const DENIED_109 = ['Agent', 'Task', 'ScheduleWakeup', 'Workflow'];
+
+test('stage 109: the deny list is the exported constant, frozen', () => {
+  assertEqual(JSON.stringify(claude.HEADLESS_DENIED_TOOLS), JSON.stringify(DENIED_109));
+  assert(Object.isFrozen(claude.HEADLESS_DENIED_TOOLS), 'not configurable at runtime');
+});
+
+test('stage 109: every packaged role dispatch (build, plan, review, test, revisit) ends --allowed-tools <role list> --disallowed-tools Agent Task ScheduleWakeup Workflow', () => {
+  for (const role of ['build', 'plan', 'review', 'test', 'revisit']) {
+    const fx = fixture();
+    canned(fx, MARKER_SUCCESS);
+    const { code } = run(fx, [role, '7', '--run-id', `s109-${role}`]);
+    assertEqual(code, 0, `${role}: dispatch succeeded`);
+    const argv = JSON.parse(fs.readFileSync(fx.argvFile, 'utf8'));
+    const packaged = JSON.parse(
+      fs.readFileSync(path.join(ROLES_DIR_103, `${role}.tools.json`), 'utf8'),
+    );
+    const allow = argv.indexOf('--allowed-tools');
+    const deny = argv.indexOf('--disallowed-tools');
+    assert(deny !== -1, `${role}: argv carries --disallowed-tools`);
+    assertEqual(argv.lastIndexOf('--disallowed-tools'), deny, `${role}: emitted exactly once`);
+    assertEqual(deny, allow + 1 + packaged.length, `${role}: deny flag directly after allowlist`);
+    assertEqual(
+      JSON.stringify(argv.slice(allow + 1, deny)),
+      JSON.stringify(packaged),
+      `${role}: allowlist verbatim`,
+    );
+    assertEqual(
+      JSON.stringify(argv.slice(deny + 1)),
+      JSON.stringify(DENIED_109),
+      `${role}: deny list is the LAST flag, verbatim`,
+    );
+  }
+});
+
+test('stage 109: buildArgv emits the deny list with and without a model override', () => {
+  for (const model of [undefined, 'claude-haiku-4-5']) {
+    const argv = claude.buildArgv({ prompt: 'p', maxTurns: 3, allowlist: ['Read'], model });
+    assertEqual(
+      JSON.stringify(argv.slice(-7)),
+      JSON.stringify(['--allowed-tools', 'Read', '--disallowed-tools', ...DENIED_109]),
+      `tail pinned (model ${model || 'absent'})`,
+    );
+  }
+});
+
+test('stage 109: readAllowlist REFUSES an allowlist that lists a denied tool, naming the entry and stage 109', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-109-'));
+  for (const entry of [
+    'Task',
+    'Agent',
+    'ScheduleWakeup',
+    'Workflow',
+    'Agent(Explore)',
+    ' Task ',
+    // Review nit (PR #285): one entry the CLI would split into several names,
+    // and case — neither may smuggle a denied tool past the loader.
+    'Read,Task',
+    'Read Task',
+    'task',
+    'Read, agent(Explore)',
+  ]) {
+    const file = path.join(dir, 'x.tools.json');
+    fs.writeFileSync(file, JSON.stringify(['Read', entry, 'Grep']));
+    let err = null;
+    try {
+      claude.readAllowlist(file);
+    } catch (e) {
+      err = e;
+    }
+    assert(err instanceof agentExec.AgentExecError, `${JSON.stringify(entry)}: refused`);
+    assertEqual(err.exitCode, 30, 'infra refusal');
+    assert(err.message.includes(JSON.stringify(entry)), `${JSON.stringify(entry)}: named`);
+    assert(err.message.includes('stage 109'), 'names stage 109');
+  }
+  // Not a denied tool: prefix look-alikes stay allowed.
+  const ok = path.join(dir, 'ok.tools.json');
+  const lookAlikes = [
+    'Read',
+    'TaskList',
+    'TaskStop',
+    'TodoWrite',
+    'Bash(git:*)',
+    // A denied NAME inside a (spaced) argument is an argument, not a tool.
+    'Bash(git commit -m Task:*)',
+  ];
+  fs.writeFileSync(ok, JSON.stringify(lookAlikes));
+  assertEqual(claude.readAllowlist(ok).length, lookAlikes.length, 'look-alikes are not refused');
+});
+
+test('stage 109: a denied tool in the allowlist refuses the dispatch — 30 bad-allowlist, agent never invoked', () => {
+  const fx = fixture();
+  canned(fx, MARKER_SUCCESS);
+  const roleDir = echoRole(fx);
+  fs.writeFileSync(path.join(roleDir, 'echo.tools.json'), JSON.stringify(['Read', 'Task']));
+  const { out, stderr, code } = run(fx, ['echo', 'hi', '--run-id', 's109-refuse']);
+  assertEqual(code, 30);
+  assertEqual(parseSingleObject(out).outcome, 'infra_error');
+  assert(stderr.includes('verity-agent-exec: 30 bad-allowlist:'), 'stderr slug line');
+  assert(stderr.includes('"Task"') && stderr.includes('stage 109'), 'reason names entry + stage');
+  assert(!fs.existsSync(fx.argvFile), 'fail closed: agent never invoked');
+});
+
+test('stage 109: every shipped allowlist loads clean under the denied-tool check', () => {
+  const files = fs.readdirSync(ROLES_DIR_103).filter((n) => n.endsWith('.tools.json'));
+  assert(files.length >= 16, 'covers every packaged role');
+  for (const name of files) {
+    const list = claude.readAllowlist(path.join(ROLES_DIR_103, name));
+    assert(list.length > 0, `${name}: loads`);
+  }
+});
+
+const SENTENCE_109 =
+  "Sub-agents (including Codex `spawn_agent`), scheduled wake-ups and workflows are DENIED in this session and there is no later turn: do the role's work inline, in this turn, yourself.";
+
+test('stage 109: RESULT_CONTRACT states the denial exactly once, right after "no human is present"', () => {
+  assertEqual(RESULT_CONTRACT.split(SENTENCE_109).length - 1, 1, 'exactly once');
+  const lines = RESULT_CONTRACT.split('\n');
+  const at = lines.indexOf(SENTENCE_109);
+  assert(at > 0, 'on its own line');
+  assert(lines[at - 1].endsWith('no human is present.'), 'directly after "no human is present"');
 });

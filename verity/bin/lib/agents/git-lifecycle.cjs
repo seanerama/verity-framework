@@ -77,8 +77,65 @@ const DEFAULT_REMOTE = 'origin';
 const PROVIDED_CAPABILITY = 'git_write';
 const MECHANISM = PROVIDED_CAPABILITIES[PROVIDED_CAPABILITY];
 
-function git(cwd, args) {
-  const res = spawnSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+// Stage 110: every git this module runs is BOUNDED. A git that talks to the
+// remote gets GIT_NET_TIMEOUT_MS (a real push/fetch of a stage branch can take
+// minutes on a slow link); everything else is a local repository read or write
+// and gets GIT_LOCAL_TIMEOUT_MS. Before this, `git push` on a dead network (or a
+// remote waiting on a credential prompt) blocked the worker indefinitely —
+// `max_wall_clock_min` is only checked BETWEEN role dispatches, so it could not
+// interrupt one. git never prompts either: GIT_TERMINAL_PROMPT=0 on every call
+// (security invariant 1.6) — a prompt nobody can answer is just a slower hang.
+const GIT_NET_TIMEOUT_MS = 300_000;
+const GIT_LOCAL_TIMEOUT_MS = 60_000;
+const GIT_NET_VERBS = new Set(['fetch', 'pull', 'push', 'clone', 'ls-remote']);
+
+// The git subcommand in an argv: the first argument that is not a global
+// option. `-c <k=v>` and `-C <dir>` take a separate value, so skip it too
+// (fetchBase runs `git -c remote.origin.followRemoteHEAD=never fetch origin`;
+// intent-artifacts runs `git -C <cwd> push …`).
+function gitSubcommand(args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const a = String(args[i]);
+    if (a === '-c' || a === '-C') {
+      i += 1;
+    } else if (!a.startsWith('-')) {
+      return a;
+    }
+  }
+  return null;
+}
+
+// The deadline for one git argv: the network window for a remote-talking verb,
+// the local window otherwise.
+function gitTimeoutMs(args) {
+  return GIT_NET_VERBS.has(gitSubcommand(args)) ? GIT_NET_TIMEOUT_MS : GIT_LOCAL_TIMEOUT_MS;
+}
+
+// Result-shaped git: never throws. A timed-out git is `ok:false` with
+// `reason: 'timeout'` (and a stderr that says so when git left none), which
+// every caller's existing fail-closed refusal consumes unchanged — a stalled
+// push reads exactly like a failed one. `opts.spawn` / `opts.timeoutMs` are
+// test seams (an injected spawnSync, a shorter deadline); production passes
+// neither.
+function git(cwd, args, opts = {}) {
+  const spawn = opts.spawn || spawnSync;
+  const timeoutMs = opts.timeoutMs ?? gitTimeoutMs(args);
+  const res = spawn('git', args, {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: timeoutMs,
+    killSignal: 'SIGTERM',
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+  });
+  if (res.error?.code === 'ETIMEDOUT') {
+    return {
+      ok: false,
+      reason: 'timeout',
+      stdout: res.stdout || '',
+      stderr: res.stderr || `git ${gitSubcommand(args) || ''} timed out after ${timeoutMs} ms`,
+    };
+  }
   if (res.error || res.status !== 0) {
     return { ok: false, stdout: res.stdout || '', stderr: res.stderr || String(res.error || '') };
   }
@@ -571,6 +628,8 @@ function finish(cwd, started, opts = {}) {
 
 module.exports = {
   DEFAULT_REMOTE,
+  GIT_LOCAL_TIMEOUT_MS,
+  GIT_NET_TIMEOUT_MS,
   MECHANISM,
   PROVIDED_CAPABILITY,
   assertProvidable,
@@ -580,6 +639,9 @@ module.exports = {
   currentRef,
   fetchBase,
   finish,
+  git,
+  gitSubcommand,
+  gitTimeoutMs,
   plan,
   report,
   resolveBase,

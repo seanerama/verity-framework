@@ -12,6 +12,7 @@
 // docs/dev/autonomy-pathmap.md "Claude Code headless interface"):
 //   claude -p "<rendered prompt>" --output-format stream-json --verbose
 //     --max-turns N --allowed-tools <each entry verbatim>
+//     --disallowed-tools Agent Task ScheduleWakeup Workflow
 // stream-json (not json) is a deliberate deviation: one invocation streams the
 // raw transcript AND ends with the same `type:"result"` object.
 const { spawnSync } = require('node:child_process');
@@ -89,6 +90,35 @@ function checkVersion(bin, opts = {}) {
 // default tool set — agent-exec refuses to invoke the agent at all (exit 30).
 // Empty arrays are rejected too: "allow nothing" must be impossible to confuse
 // with "forgot the file" / "flag omitted".
+// --- headless roles cannot delegate (stage 109) --------------------------------
+// In `claude -p` there is no later turn: a background sub-agent dies with the
+// parent and a scheduled wake-up never fires. The 2026-09-25 fixture-A run
+// (benchmark-findings §9 finding 3) had the build role launch an async
+// executor, call ScheduleWakeup, and end its turn "waiting" — nothing
+// committed, a whole tick burned. The T06 allowlist could not stop it:
+// --allowed-tools only PRE-APPROVES tools that would otherwise prompt, and
+// Agent (the renamed Task) / ScheduleWakeup need no permission, so they run
+// whether listed or not. --disallowed-tools is the only mechanism that removes
+// them (probe B, 2026-09-25: "Agent tool not available in this session").
+// Not configurable: a role that must delegate is interactive, not headless.
+const HEADLESS_DENIED_TOOLS = Object.freeze(['Agent', 'Task', 'ScheduleWakeup', 'Workflow']);
+
+// A denied tool named bare (`Task`), parameterized (`Agent(Explore)`), in any
+// case (`task`), or smuggled inside one comma/space-joined entry (`Read,Task`,
+// `Read Task` — the CLI splits such an entry into separate tool names).
+// Parenthesized arguments are dropped BEFORE splitting, so a spaced argument
+// (`Bash(git commit -m Task:*)`) never reads as a tool name; look-alikes
+// (`TaskList`, `TaskStop`, `TodoWrite`) are whole names and never match.
+const DENIED_LOWER = HEADLESS_DENIED_TOOLS.map((t) => t.toLowerCase());
+function deniedEntry(entry) {
+  const names = entry
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\(.*$/s, ' ')
+    .split(/[\s,]+/)
+    .filter((n) => n.length > 0);
+  return names.some((n) => DENIED_LOWER.includes(n.toLowerCase())) ? entry : null;
+}
+
 function readAllowlist(toolsFile) {
   if (!fs.existsSync(toolsFile)) {
     throw new AgentExecError(
@@ -105,6 +135,15 @@ function readAllowlist(toolsFile) {
   if (!Array.isArray(parsed) || parsed.length === 0 || parsed.some((t) => typeof t !== 'string')) {
     throw new AgentExecError(
       `invalid allowlist ${toolsFile}: must be a non-empty JSON array of strings`,
+    );
+  }
+  // Fail closed (stage 109): an allowlist that grants a tool every headless
+  // dispatch denies would make the two lists contradict each other — refuse it
+  // rather than let the file claim a capability the session never has.
+  const denied = parsed.map(deniedEntry).find((e) => e !== null);
+  if (denied !== undefined) {
+    throw new AgentExecError(
+      `invalid allowlist ${toolsFile}: lists ${JSON.stringify(denied)}, but ${HEADLESS_DENIED_TOOLS.join('/')} are denied on every headless Claude dispatch (stage 109) — remove the entry; a role that must delegate is interactive, not headless`,
     );
   }
   return parsed;
@@ -186,11 +225,13 @@ function renderPrompt(file, roleArgs) {
   return `${text.trimEnd()}\n${RESULT_CONTRACT}`;
 }
 
-// The verified headless argv. Variadic --allowed-tools LAST so it can't
-// swallow other args; entries verbatim (T06 — the caller guarantees a
-// non-empty list via readAllowlist). The optional model override (stage 9 —
-// the worker's `agent.model` knob) is omitted-in: without it the argv is
-// byte-identical to the pre-stage-9 shape.
+// The verified headless argv. The two variadic flags come LAST so neither can
+// swallow other args: --allowed-tools second to last, entries verbatim (T06 —
+// the caller guarantees a non-empty list via readAllowlist), then the fixed
+// --disallowed-tools deny list as the final flag on EVERY dispatch (stage 109;
+// the next `--` flag ends --allowed-tools' entries). The optional model
+// override (stage 9 — the worker's `agent.model` knob) is omitted-in: without
+// it the argv is byte-identical to the pre-stage-9 shape.
 function buildArgv({ prompt, maxTurns, allowlist, model }) {
   const argv = [
     '-p',
@@ -205,6 +246,7 @@ function buildArgv({ prompt, maxTurns, allowlist, model }) {
     argv.push('--model', model);
   }
   argv.push('--allowed-tools', ...allowlist);
+  argv.push('--disallowed-tools', ...HEADLESS_DENIED_TOOLS);
   return argv;
 }
 
@@ -350,6 +392,7 @@ module.exports = {
   displayName: 'Claude Code',
   binaryEnvVar: 'VERITY_CLAUDE_BIN',
   defaultBinary: DEFAULT_BINARY,
+  HEADLESS_DENIED_TOOLS,
   MIN_CLAUDE_VERSION,
   supportsMaxTurns: true,
   buildArgv,

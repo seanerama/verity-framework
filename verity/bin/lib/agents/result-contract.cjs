@@ -17,6 +17,7 @@ const OUTCOMES = ['success', 'gated', 'failed'];
 const RESULT_CONTRACT = `
 <headless-result-contract>
 You are running headless under \`verity agent-exec\` — no human is present.
+Sub-agents (including Codex \`spawn_agent\`), scheduled wake-ups and workflows are DENIED in this session and there is no later turn: do the role's work inline, in this turn, yourself.
 Never wait for user input or ask questions. If progress requires a human
 decision, approval, or gate, stop working and report the outcome "gated".
 The very LAST line of your final message MUST be exactly one single-line JSON

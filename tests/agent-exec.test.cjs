@@ -280,10 +280,18 @@ test('agent-exec: invokes the verified claude headless flags', () => {
   const packaged = JSON.parse(
     fs.readFileSync(path.join(__dirname, '..', 'commands', 'verity', 'build.tools.json'), 'utf8'),
   );
+  // Stage 109: the allowlist runs up to the --disallowed-tools deny list, which
+  // is the LAST flag of every headless Claude argv.
+  const j = argv.indexOf('--disallowed-tools');
   assertEqual(
-    JSON.stringify(argv.slice(i + 1)),
+    JSON.stringify(argv.slice(i + 1, j)),
     JSON.stringify(packaged),
-    'packaged build allowlist passed verbatim, flag last',
+    'packaged build allowlist passed verbatim, directly before the deny list',
+  );
+  assertEqual(
+    JSON.stringify(argv.slice(j + 1)),
+    '["Agent","Task","ScheduleWakeup","Workflow"]',
+    'deny list last',
   );
 });
 
@@ -315,9 +323,9 @@ test('agent-exec: allowlist seam — <role>.tools.json passed verbatim, repo cop
   const i = argv.indexOf('--allowed-tools');
   assert(i > 0, '--allowed-tools passed when the allowlist exists');
   assertEqual(
-    JSON.stringify(argv.slice(i + 1)),
+    JSON.stringify(argv.slice(i + 1, argv.indexOf('--disallowed-tools'))),
     '["Read","Grep","Bash(git *)"]',
-    'entries verbatim, flag last',
+    'entries verbatim, directly before the stage-109 deny list',
   );
 });
 

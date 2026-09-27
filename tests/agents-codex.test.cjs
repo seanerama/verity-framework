@@ -322,6 +322,9 @@ test('argv: Claude-only flags NEVER sent to codex', () => {
   const argv = readJson(fx.argvFile);
   for (const forbidden of [
     '--allowed-tools',
+    // Stage 109: Claude-only in SPELLING — Codex denies its sub-agents too, but
+    // through its own documented flag, `--disable multi_agent` (asserted below).
+    '--disallowed-tools',
     '--max-turns',
     '--output-format',
     'stream-json',
@@ -337,10 +340,74 @@ test('argv: Claude-only flags NEVER sent to codex', () => {
   }
 });
 
+// --- stage 109: headless roles cannot delegate — on Codex too ---
+// codex-cli ships `multi_agent` (spawn_agent/wait_agent) stable and ON by default
+// (observed at the 0.146.0 floor and at 0.154.0). `codex exec` has no later
+// turn, so every dispatch disables it with the documented FLAG — never the
+// `-c features.multi_agent=false` spelling, which Codex silently absorbs when
+// the key is wrong (the CDX-002/003 trap).
+function assertDisablesMultiAgent(argv, label) {
+  const at = argv.indexOf('--disable');
+  assert(at !== -1, `${label}: argv carries --disable (${JSON.stringify(argv)})`);
+  assertEqual(argv.lastIndexOf('--disable'), at, `${label}: --disable emitted exactly once`);
+  assertEqual(argv[at + 1], 'multi_agent', `${label}: element-anchored: --disable multi_agent`);
+  assert(
+    at > argv.indexOf('approval_policy="never"'),
+    `${label}: after the -c approval_policy pair`,
+  );
+  const model = argv.indexOf('--model');
+  if (model !== -1) {
+    assert(at + 1 < model, `${label}: before --model`);
+  }
+  assertEqual(argv[argv.length - 1], '-', `${label}: stdin \`-\` stays LAST`);
+  assert(
+    argv.every((a) => !a.includes('features.')),
+    `${label}: no -c features.* spelling — it would fail silently on a typo`,
+  );
+}
+
+test('stage 109: codex buildArgv ends --disable multi_agent [--model m] - on every policy, with and without a model', () => {
+  for (const block of [
+    {},
+    { ignore_user_config: true },
+    { ignore_rules: true },
+    { ignore_user_config: true, ignore_rules: true },
+  ]) {
+    const base = argvFor(block);
+    assertDisablesMultiAgent(base, `policy ${JSON.stringify(block)}`);
+    assertEqual(
+      JSON.stringify(base.slice(-3)),
+      JSON.stringify(['--disable', 'multi_agent', '-']),
+      'no model: the pair sits directly before the stdin marker',
+    );
+  }
+  const withModel = argvFor({ ignore_user_config: true }, 'gpt-5-codex');
+  assertDisablesMultiAgent(withModel, 'with --model');
+  assertEqual(
+    JSON.stringify(withModel.slice(-5)),
+    JSON.stringify(['--disable', 'multi_agent', '--model', 'gpt-5-codex', '-']),
+    'with a model: --disable multi_agent, then --model, then -',
+  );
+});
+
+test('stage 109: the LIVE codex argv (the one the binary received) disables multi_agent', () => {
+  const fx = fixture();
+  const { code } = runCodex(fx, ['echo', 'hi', '--run-id', 'i-109']);
+  assertEqual(code, 0);
+  assertDisablesMultiAgent(readJson(fx.argvFile), 'live dispatch');
+});
+
+test('stage 109: the rendered Codex prompt states the (now enforced) denial, naming spawn_agent', () => {
+  const sentence =
+    "Sub-agents (including Codex `spawn_agent`), scheduled wake-ups and workflows are DENIED in this session and there is no later turn: do the role's work inline, in this turn, yourself.";
+  const prompt = codex.renderPrompt(path.join(ROLES_DIR, 'build.md'), ['7']);
+  assertEqual(prompt.split(sentence).length - 1, 1, 'exactly once in the codex build prompt');
+});
+
 // --- stage-10 argv regressions (CDX-002/003/006): documented flags, not -c keys ---
 
 // buildArgv against a real loaded policy (the same loader the driver uses).
-function argvFor(codexBlock) {
+function argvFor(codexBlock, model) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-argv-'));
   const file = path.join(dir, 'x.permissions.json');
   fs.writeFileSync(
@@ -355,6 +422,7 @@ function argvFor(codexBlock) {
     policy: policy.loadPolicy(file),
     finalMessagePath: path.join(dir, 'r.final.json'),
     cwd: dir,
+    model,
   });
 }
 

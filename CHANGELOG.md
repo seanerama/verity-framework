@@ -2,6 +2,124 @@
 
 ## [Unreleased]
 
+## 1.6.0
+
+### Added
+
+- **`verity usage untrack` and `verity usage recover` (stage 108).**
+  `untrack [--json]` is an operator verb; the worker never runs it. It makes
+  one bot-authored commit that adds the ignore line to `.gitignore` and stops
+  tracking `.verity/usage.csv`, keeping the file on disk. The commit is built
+  from `HEAD`'s `.gitignore`, so unrelated uncommitted edits are never
+  included, and no hooks run. It refuses (`ok: false`, exit 1) while a merge,
+  cherry-pick, revert or rebase is in progress, and does nothing if the file
+  is already untracked. `recover [--json]` merges the old in-tree file and
+  every old `chore(verity): usage` commit on any local branch into the live
+  ledger, sorted by timestamp, and never changes the in-tree file. It reports
+  `path`, `commits_scanned`, `tree_rows`, `rows_before`, `rows_added` and
+  `rows_after`. A second run adds nothing, and a commit whose ledger cannot
+  be read is skipped and counted. It does not change benchmark records.
+
+### Fixed
+
+- **A lost network now costs the worker seconds, not hours (stage 110).** On
+  the 2026-09-25 fixture A benchmark run, a local network outage kept a
+  worker tick alive for about 95 minutes after its last useful work. It
+  reported `infra` only once the network came back, and its lock expired in
+  the meantime. No `gh` or `git` call on the worker path had a timeout, and
+  `max_wall_clock_min` is only checked between role dispatches, so nothing
+  could interrupt a hung call. Now every `gh` attempt is killed after 60 s,
+  every `git fetch`/`pull`/`push`/`clone`/`ls-remote` after 5 min, and every
+  other `git` after 60 s. git never prompts (`GIT_TERMINAL_PROMPT=0`). The
+  `gh` layer has two new transient classes, `timeout` and `network`
+  (`network is unreachable`, `dial tcp`, `no such host`, …). Both are retried
+  up to 3 times with backoff, then fail with a `GhError` whose `reason` names
+  the class, so a short blip no longer ends the tick. A timed-out `git`
+  returns `ok:false` with `reason: 'timeout'` and hits the same fail-closed
+  refusal as any failed push. `gh.run` takes an optional `timeoutMs`.
+- **The benchmark harness waits out an outage instead of burning its tick
+  budget, and keeps every tick's output (stage 110).** When `operator
+  snapshot` cannot read (`online: false`), `verity benchmark run` no longer
+  spawns a tick. It sleeps (doubling to 5 min between reads) and re-reads,
+  and stops with `stop_reason: offline` / `outcome: incomplete` after
+  `--offline-budget-min` (or `limits.offline_budget_min` in
+  `benchmark.json`, default 60). Each worker tick is killed after
+  `max_wall_clock_min × 1.5 + 5` minutes, which is just past the lock TTL. A
+  killed tick is recorded as `tick_timeout` and the run continues. Each
+  tick's stdout and stderr, including the plan tick's, go to
+  `~/.verity/logs/benchmark-<run_id>/tick-<NNN>.log` with `VERITY_GH_LOG=1`
+  on, redacted and mode 0600. The results record gains `ticks[]`,
+  `offline_waits` and `offline_secs`. All new record fields are additive.
+
+- **Headless roles can no longer hand their work to a sub-agent (stage 109).**
+  In `claude -p` there is no later turn: a background sub-agent dies with the
+  parent and a scheduled wake-up never fires. On the 2026-09-25 fixture A
+  benchmark run the build role launched an async sub-agent, called
+  `ScheduleWakeup`, and ended its turn waiting for a notification that never
+  came. Nothing was committed and the tick was wasted (465k tokens). The
+  allowlist could not stop it, because `--allowed-tools` only pre-approves
+  tools that would otherwise ask for permission, and these tools never ask.
+  Every headless Claude dispatch (`verity agent-exec`, so every worker run)
+  now ends its argv with `--disallowed-tools Agent Task ScheduleWakeup
+  Workflow`. This is not configurable. `Task` is removed from the `build`,
+  `test` and `revisit` allowlists, and an allowlist that lists any of the
+  four tools is refused with exit 30 `bad-allowlist`, naming the entry. The
+  headless result contract now tells the role that these tools are denied and
+  that it must do the work itself, in this turn. Codex is enforced too: its
+  `multi_agent` feature (`spawn_agent`/`wait_agent`) is stable and on by
+  default, so every `codex exec` dispatch now passes `--disable multi_agent`.
+  This is also not configurable. The flag was verified at the 0.146.0 floor and
+  at 0.154.0, so `codexMinVersion` does not change. Both providers are
+  enforced in the argv: `--disallowed-tools` for Claude, `--disable
+  multi_agent` for Codex. The contract sentence names `spawn_agent` so a Codex
+  role recognises it.
+
+  **Upgrade note:** a project-local
+  `.claude/commands/verity/{build,test,revisit}.tools.json` installed before
+  this release still lists `Task`. After the engine upgrade, those headless
+  dispatches fail closed with exit 30 `bad-allowlist` until you re-run
+  `verity install` to refresh the allowlists.
+
+- **The usage ledger no longer loses rows when the worker switches branches
+  (stage 108, ADR-0036).** The worker used to commit `.verity/usage.csv` after
+  each run (`chore(verity): usage <run-id>`) on the stage branch it had just
+  built on. The next stage branch was forked from the merged default branch,
+  which did not have that commit, so those rows disappeared from the file. On
+  the 2026-09-25 fixture A benchmark run, 9 of 14 rows were lost and the
+  scorecard showed 5.98M input tokens against a true 16.42M. The daily
+  `max_usd_per_day` and `max_runs_per_day` breakers read the same file and
+  were under-enforced by the same amount. The ledger is now runtime state and
+  is never committed. Inside a git repository it lives in the git directory,
+  at `<git-dir>/verity/usage.csv`, which no checkout, merge or reset touches.
+  Outside git it stays at `.verity/usage.csv`. Every reader uses the same
+  file, and `verity usage --json` reports it as `path`. The scaffold
+  `.gitignore` also ignores `.verity/usage.csv`. The policy key `commit_usage`
+  is still accepted, now defaults to `false`, and is ignored. Setting it to
+  `true` prints one warning and is never an error. On its first run in an
+  older repository, the worker seeds the new ledger once from the old file
+  and the old usage commits, reading git only. It never makes a commit for
+  the ledger. If the tree still tracks `.verity/usage.csv`, it prints one
+  warning, and `verity doctor` shows a warning row.
+
+### Merged commits (generated from Conventional Commits; `dev#NN` = dev-repo PR)
+
+#### Fixes
+- bounded external calls and retained tick logs (dev#289)
+
+#### Chores
+- record PROM-0004 — finalize v1.5.0 released (prod tag v1.5.0)
+- record PROM-0004 — propose v1.5.0 (prod PR 7)
+
+#### Other
+- plan(stage 110): bounded external calls and retained tick logs — timeouts on every gh/git call on the worker path, transient network/timeout classes, harness waits offline instead of ticking, tick deadline aligned to the lock TTL, per-tick worker logs
+- [stage 109] Headless roles cannot delegate — deny the sub-agent and scheduling tools on every headless Claude dispatch, and say so in the headless contract (dev#285)
+- plan(stage 109): headless roles cannot delegate — deny Agent/Task/ScheduleWakeup/Workflow on every headless Claude dispatch; truthful allowlists; headless contract sentence
+- adr(0036): Accepted — operator confirmation 2026-09-25 (re-applied: the earlier acceptance commit landed on the executor's local branch and was dropped); implemented by stage 108 (dev#282, fdfd711)
+- [stage 108] Usage ledger is runtime state, not branch history — branch-independent rows, no per-branch commits, recovery of orphaned rows (dev#282)
+- plan(stage 108): usage ledger is runtime state, not branch history (ADR-0036 proposed); findings §8/§9 for the 2026-09-25 D and A benchmark runs; benchmark.json (no secrets)
+- golive: secrets-rotated and security-signoff recorded n/a (operator decision 2026-09-24 — framework, not an app; security hardening deferred until the MVP is observed working); gate ready
+- golive: record three gate answers (cross-user-isolation n/a, backup-coverage ok after the first tracker dump, throwaway-accounts ok); secrets-rotated and security-signoff stay unanswered on purpose; recovery plan notes the 2026-09-24 backup
+
 ## 1.5.0
 
 ### Added

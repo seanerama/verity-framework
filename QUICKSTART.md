@@ -93,7 +93,8 @@ Code session as cockpit — it journals every snag and maps it to the part of th
 that owns it, so you can smooth the rough edges afterward.
 
 **B5. Watch the cost.** Every run posts an audit comment (roles, outcome, tokens, est. $,
-wall time) and appends to `.verity/usage.csv`:
+wall time) and appends to the usage ledger (`<git-dir>/verity/usage.csv`, or `.verity/usage.csv`
+outside git):
 
 ```bash
 verity usage --days 7

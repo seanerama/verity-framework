@@ -38,6 +38,7 @@ handed to `/verity:plan` — the only place stages are born.
   other roles; name the role instead.
 - Delegate bulk reading (the source sweep, the codebase analysis) to a sub-agent
   and take back a summary; keep the verdicts and the report in this loop.
+  Headless (sub-agents are denied): do it yourself in this turn.
 </rules>
 
 <process>
@@ -74,7 +75,8 @@ handed to `/verity:plan` — the only place stages are born.
    - dependency drift — `npm outdated`, `npm audit` when allowed; otherwise
      "not checked";
    - docs rot — README claims vs. source.
-   Delegate the source sweep to a sub-agent; keep the verdicts.
+   Delegate the source sweep to a sub-agent; keep the verdicts (headless: do it
+   yourself in this turn).
 
 4. **Adoption mode — analysis.** Delegate a structure / stack / topology sweep.
    Derive **identity candidates** (`name`, `slug`, `owner`, `image_prefix`) from

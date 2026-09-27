@@ -158,7 +158,9 @@ const COMMANDS = {
     return agentExec.dispatch(rest, flags);
   },
   // Usage ledger rollups (SKETCH §3.4): totals over the last --days N UTC
-  // calendar days from .verity/usage.csv — runs, tokens, est USD, outcomes.
+  // calendar days from the ledger (usage.ledgerPath: <git-dir>/verity/usage.csv,
+  // or .verity/usage.csv outside git — stage 108) — runs, tokens, est USD,
+  // outcomes; plus the `untrack` / `recover` maintenance verbs.
   usage(rest, flags) {
     return usage.dispatch(rest, flags);
   },
@@ -346,6 +348,11 @@ function main() {
       emit(result, flags);
       process.exitCode = gates.exitCodeFor(result);
       return;
+    }
+    if (noun === 'usage' && result && result.ok === false) {
+      // Stage 108: `usage untrack` refusing (an in-progress merge/rebase/…)
+      // reports the refusal object AND exits non-zero.
+      process.exitCode = 1;
     }
     if ((noun === 'autonomy' || noun === 'usage') && flags.json) {
       // SKETCH §3.2 `autonomy show --json` / §3.4 `usage --json`: exactly one

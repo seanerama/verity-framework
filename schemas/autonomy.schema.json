@@ -106,9 +106,9 @@
       "default": []
     },
     "commit_usage": {
-      "description": "Worker commits .verity/usage.csv after each run with message 'chore(verity): usage <run-id>' (verity-autonomy-technical-sketch.md §3.4).",
+      "description": "IGNORED since stage 108 (ADR-0036): .verity/usage.csv is runtime state and is never committed. Kept as a valid boolean so older policies still load; setting it true only produces a warning.",
       "type": "boolean",
-      "default": true
+      "default": false
     },
     "agent": {
       "description": "Which model runtime the autonomy worker drives (stage 9, ADR-0005/0007/0009). Defaults keep every pre-existing policy Claude-backed; codex requires an explicit provider edit. The worker resolves ONE immutable effective config per run from this block. NO unrestricted-access value exists anywhere in this schema (ADR-0007).",

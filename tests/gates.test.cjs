@@ -1236,10 +1236,14 @@ function dispatchClaude(fx, extraArgs) {
   return { result: JSON.parse(out.split('\n').filter(Boolean)[0]), argv };
 }
 
+// The allowlist runs from --allowed-tools up to the stage-109 deny flag, which
+// is the final flag of every headless Claude argv.
 function allowedTools(argv) {
   const i = argv.indexOf('--allowed-tools');
+  const j = argv.indexOf('--disallowed-tools');
   assert(i !== -1, 'argv carries --allowed-tools');
-  return argv.slice(i + 1);
+  assert(j > i, 'the --disallowed-tools deny list follows the allowlist');
+  return argv.slice(i + 1, j);
 }
 
 test('claude: a LOCAL dispatch proceeds with gh/network tools stripped; a github dispatch surface is byte-identical to the role file', () => {

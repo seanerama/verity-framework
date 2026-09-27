@@ -419,3 +419,14 @@ test('CLI: verity install --dry-run vision --raw prints the rendered role', () =
   assert(out.includes(RUNTIME_PREAMBLE), 'rendered output includes the runtime preamble');
   assertEqual(fs.readdirSync(cwd).length, 0, 'cwd untouched — dry-run writes nothing');
 });
+
+// Stage 109: the headless build prompt STATES that delegation is denied, so
+// build.md's "inline only when the Task tool is genuinely denied" rule fires
+// without a probe. Exactly once, in the rendered headless prompt.
+test('stage 109: rendered headless build prompt says sub-agents/wake-ups/workflows are DENIED — exactly once', () => {
+  const sentence =
+    "Sub-agents (including Codex `spawn_agent`), scheduled wake-ups and workflows are DENIED in this session and there is no later turn: do the role's work inline, in this turn, yourself.";
+  const prompt = agentExec.renderPrompt(path.join(ROLES_DIR, 'build.md'), ['7']);
+  assertEqual(count(prompt, sentence), 1, 'build prompt carries the denial sentence exactly once');
+  assertEqual(count(agentExec.RESULT_CONTRACT, sentence), 1, 'RESULT_CONTRACT carries it once');
+});

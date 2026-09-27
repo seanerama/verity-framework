@@ -573,6 +573,35 @@ function providerTrustChecks(opts = {}) {
     }));
 }
 
+// Stage 108 (ADR-0036 amended): a repository that still TRACKS
+// .verity/usage.csv carries a stale copy of the ledger (the live one is the
+// git-dir sidecar, usage.ledgerPath) — and a tracked in-tree file is what
+// lets a checkout clobber a working-tree ledger. One warning row — ok:true,
+// because nothing is lost (the worker seeds the sidecar from it); the row
+// exists so the operator can see it and run the verb. Emitted ONLY when
+// tracked (untracked, or cwd not a git repo ⇒ zero rows, byte-identical
+// output) and only when a cwd is supplied.
+const LEDGER_TRACKED_DETAIL =
+  'warning: .verity/usage.csv is tracked by git — since stage 108 (ADR-0036) the live usage ledger is <git-dir>/verity/usage.csv and the tracked file is stale history; run `verity usage untrack` and merge the change it makes (the worker never commits it), and `verity usage recover` to fold any orphaned rows into the live ledger';
+
+function ledgerChecks(opts = {}) {
+  if (typeof opts.cwd !== 'string') {
+    return [];
+  }
+  let tracked = null;
+  try {
+    tracked = require('./usage.cjs').isLedgerTracked(opts.cwd);
+  } catch {
+    tracked = null; // doctor degrades informatively, never fatally
+  }
+  if (tracked !== true) {
+    return [];
+  }
+  return [
+    { name: 'usage-ledger', present: true, version: null, ok: true, detail: LEDGER_TRACKED_DETAIL },
+  ];
+}
+
 function runChecks(opts = {}) {
   // Stage 87 (ADR-0030): the resolved gate_runner travels beside the resolved
   // substrate — 'localhost' appends its Docker+act probe rows and (stage 88)
@@ -584,6 +613,8 @@ function runChecks(opts = {}) {
   // Stage 94 (ADR-0031): zero rows while registry and table agree — appended
   // like every other conditional row block, so today's output is unchanged.
   const trustRows = providerTrustChecks(opts);
+  // Stage 108: zero rows unless the cwd's ledger is tracked.
+  const ledgerRows = ledgerChecks(opts);
   if (opts.agent === 'codex') {
     const deps = opts.deps || CODEX_DEPENDENCIES;
     return [
@@ -591,10 +622,11 @@ function runChecks(opts = {}) {
       ...codexEnvironmentChecks(opts),
       ...gateRows,
       ...trustRows,
+      ...ledgerRows,
     ];
   }
   const deps = opts.deps || DEPENDENCIES;
-  return [...deps.map((dep) => checkOrSkip(dep, opts)), ...gateRows, ...trustRows];
+  return [...deps.map((dep) => checkOrSkip(dep, opts)), ...gateRows, ...trustRows, ...ledgerRows];
 }
 
 // 0 = every check ok, 1 = at least one failing check (the `--quiet` contract).
@@ -703,7 +735,16 @@ function dispatch(args, flags = {}) {
   } catch {
     gateRunner = undefined; // unreadable policy never breaks doctor
   }
-  return runChecks({ agent: selection.agent, substrate, gateRunner });
+  const cwd = flags.cwd || process.cwd();
+  const checks = runChecks({ agent: selection.agent, substrate, gateRunner, cwd });
+  // Stage 108: the tracked-ledger warning also lands on stderr as a line, so
+  // it is seen even when stdout is piped to jq.
+  if (checks.some((c) => c.name === 'usage-ledger')) {
+    process.stderr.write(
+      `verity doctor: warn: ${LEDGER_TRACKED_DETAIL.replace(/^warning: /, '')}\n`,
+    );
+  }
+  return checks;
 }
 
 module.exports = {
@@ -718,6 +759,7 @@ module.exports = {
   exitCodeFor,
   firstLine,
   gateRunnerChecks,
+  ledgerChecks,
   parseVersion,
   providerTrustChecks,
   resolveAgent,

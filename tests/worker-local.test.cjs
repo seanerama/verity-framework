@@ -24,6 +24,7 @@ const gh = require('../verity/bin/lib/gh.cjs');
 const scanner = require('../verity/bin/lib/scanner.cjs');
 const stage = require('../verity/bin/lib/stage.cjs');
 const sub = require('../verity/bin/lib/substrate-local.cjs');
+const usage = require('../verity/bin/lib/usage.cjs');
 const worker = require('../verity/worker/index.cjs');
 
 const WORKER = path.join(__dirname, '..', 'verity', 'worker', 'index.cjs');
@@ -732,7 +733,9 @@ test('stage 85 PIPELINE e2e: full local runOnce — build → SHA-pinned gates �
   assert(out.includes('local comment for work-item #1'), `summary route: ${out}`);
   assert(out.includes('🤖 **verity-worker**'), 'the §7 template is intact');
   assert(/roles: build → review/.test(out), `both roles ran: ${out}`);
-  assert(fs.existsSync(path.join(dir, '.verity', 'usage.csv')), 'usage ledger written');
+  // Stage 108 (ADR-0036): the git-dir sidecar, never a working-tree file.
+  assert(fs.existsSync(usage.ledgerPath(dir)), 'usage ledger written');
+  assert(!fs.existsSync(path.join(dir, '.verity', 'usage.csv')), 'nothing written in the tree');
 
   // The REAL engine acts happened: green SHA-pinned gate-run record …
   const recPath = path.join(dir, '.verity', 'gate-runs', `${sub.branchSlug(branch)}.json`);

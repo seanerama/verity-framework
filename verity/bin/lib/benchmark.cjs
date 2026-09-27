@@ -34,6 +34,11 @@ const substrateLocal = require('./substrate-local.cjs');
 // a local fixture ships a runnable committed gate definition — provision never
 // synthesizes one (a default gate list would be a fabricated green, ADR-0028).
 const gates = require('./gates.cjs');
+// Stage 110: the worker lock's TTL headroom (read only — the harness's per-tick
+// deadline is aligned to it) and the shared credential redaction the tick logs
+// pass through before they touch disk.
+const locks = require('./locks.cjs');
+const ledger = require('./ledger.cjs');
 
 // The intake label the scanner's P4 tier lists and the worker plans (SKETCH §1
 // / §4.2): an OPEN issue labeled `verity:request` is selected as a P4 item, and
@@ -159,6 +164,23 @@ function loadConfig(pathOrOpts) {
       reason: 'benchmark.json: `seed_token_env` must be a non-empty string (an env var name)',
     };
   }
+  // Stage 110: optional `limits.offline_budget_min` (top level or under
+  // variant.limits — where the caps may live) — minutes the drive loop waits
+  // out an unreadable snapshot before stopping 'offline'. Validated so a typo
+  // fails closed instead of silently becoming the 60-minute default.
+  for (const [where, caps] of [
+    ['limits', parsed.limits],
+    ['variant.limits', parsed.variant?.limits],
+  ]) {
+    const v = caps && typeof caps === 'object' ? caps.offline_budget_min : undefined;
+    if (v !== undefined && !(Number.isInteger(v) && v >= 0)) {
+      return {
+        enabled: false,
+        valid: false,
+        reason: `benchmark.json: \`${where}.offline_budget_min\` must be a non-negative integer (minutes)`,
+      };
+    }
+  }
   return parsed;
 }
 
@@ -220,10 +242,26 @@ function datedSlug(fixtureId, now) {
   return `${String(fixtureId).toLowerCase()}-${stamp}`;
 }
 
+// Stage 110: the default deadline for one harness step (a provision git/gh
+// call, an `operator snapshot` read). Generous — a `gh repo create` or the
+// initial push can be slow — but FINITE: nothing the harness shells may block
+// it forever. A worker tick overrides it with its own lock-aligned deadline
+// (tickTimeoutMs below).
+const HARNESS_STEP_TIMEOUT_MS = 10 * 60_000;
+
 // Default spawn: spawnSync, success == exit 0. Injectable via opts.spawn so the
-// suite records the call sequence and NO real git/gh/verity runs.
-function defaultSpawn(cmd, args, options) {
-  return spawnSync(cmd, args, { stdio: 'pipe', ...options });
+// suite records the call sequence and NO real git/gh/verity runs. Stage 110:
+// every call is bounded (a caller's `timeout` wins over the default) and git
+// never prompts (GIT_TERMINAL_PROMPT=0 layered over whatever env the caller
+// passed — security invariant 1.6; a headless run cannot answer a prompt).
+function defaultSpawn(cmd, args, options = {}) {
+  return spawnSync(cmd, args, {
+    stdio: 'pipe',
+    timeout: HARNESS_STEP_TIMEOUT_MS,
+    killSignal: 'SIGTERM',
+    ...options,
+    env: { ...(options.env || process.env), GIT_TERMINAL_PROMPT: '0' },
+  });
 }
 
 // A spawn result is a success iff the process launched and exited 0. A spawn
@@ -551,15 +589,26 @@ function provision(fixtureId, opts = {}) {
         reason: `local-substrate provision for fixture '${fixture}' has no runnable committed gate definition: ${err.message} — ship a real ${gates.GATES_FILE} in the fixture's committed assets (seed_dir/stages_dir); without one every local stage honestly reads UNKNOWN and nothing ever merges (stage 83, ADR-0029 §4)`,
       };
     }
-    // Local runs write the usage ledger INTO the working repo (there is no
-    // separate CI machine); the stage-82 gate runner refuses on ANY dirty
-    // tree (SHA-pinned record honesty). Ignore the ledger so a mid-run
-    // usage.csv can never turn every later gate run into a refusal — the
-    // provision-side fix; the runner's honesty check is never weakened.
-    fs.appendFileSync(
-      path.join(repoDir, '.gitignore'),
-      '\n# Verity local substrate (stage 83, ADR-0029): the run ledger is runtime\n# state, not committed work — it must never dirty a SHA-pinned gate run.\n.verity/usage.csv\n',
-    );
+  }
+
+  // The usage ledger is runtime state on EVERY substrate (stage 108, ADR-0036;
+  // stage 83 first reached that conclusion for 'local' alone, where a mid-run
+  // usage.csv must never dirty a SHA-pinned gate run). The scaffold template
+  // already ignores it; this idempotent ensure covers a seed_dir/stages_dir
+  // that ships its own .gitignore over the template, and never writes the line
+  // twice (a no-op on every fixture today). Only an EXISTING .gitignore is
+  // touched — the scaffold step always writes one.
+  const gitignore = path.join(repoDir, '.gitignore');
+  try {
+    if (fs.existsSync(gitignore)) {
+      usage.ensureIgnoreLine(gitignore);
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      step: 'gitignore',
+      reason: `failed to ensure the usage-ledger ignore line: ${err.message}`,
+    };
   }
 
   const gitSteps = [
@@ -804,6 +853,164 @@ const DEFAULT_MAX_TICKS = 50;
 // A few seconds lets GitHub register the checks; injectable for tests.
 const DRIVE_CI_WAIT_MS = 5000;
 
+// Stage 110: how long the drive loop waits out an UNREADABLE snapshot
+// (`online:false` — a read failure, never a fabricated empty state) before it
+// stops with stop_reason 'offline'. During an outage every tick would fail in
+// seconds and burn the tick budget in minutes; waiting costs nothing. The wait
+// between re-reads starts at the drive wait and doubles to OFFLINE_MAX_WAIT_MS.
+// Overridable per run: `--offline-budget-min` / benchmark.json
+// `limits.offline_budget_min`.
+const OFFLINE_BUDGET_MS = 60 * 60_000;
+const OFFLINE_MAX_WAIT_MS = 5 * 60_000;
+
+// Stage 110: a worker tick's stdout+stderr is kept (tick logs); the default
+// 1 MiB spawnSync buffer would KILL a chatty worker (ENOBUFS) now that the gh
+// retry log is on, so a tick gets a larger, still finite, one.
+const TICK_MAX_BUFFER = 64 * 1024 * 1024;
+
+// Stage 110: the harness-side deadline for ONE `verity-worker --once` tick,
+// aligned to the lock TTL (locks.cjs: expires = now + max_wall_clock_min ×
+// TTL_FACTOR) plus 5 minutes of slack — by the time the harness gives up on a
+// tick, the lock that tick held has already lapsed, which is what the TTL is
+// for. The worker checks max_wall_clock_min only BETWEEN role dispatches, so
+// this is the only bound on a tick that hangs inside one.
+function tickTimeoutMs(maxWallClockMin) {
+  return Math.round((maxWallClockMin * locks.TTL_FACTOR + 5) * 60_000);
+}
+
+// The max_wall_clock_min the worker will actually run under: the fixture's
+// EFFECTIVE policy (defaults ⊕ the variant writeVariant just wrote), read
+// through autonomy's own loader. An unloadable policy falls back to the engine
+// default — the worker would refuse to start on it anyway, so the deadline only
+// needs to be finite.
+function effectiveWallClockMin(dir) {
+  try {
+    const min = autonomy.loadPolicy(dir).limits.max_wall_clock_min;
+    if (Number.isInteger(min) && min > 0) {
+      return min;
+    }
+  } catch {
+    // fall through to the engine default
+  }
+  return autonomy.DEFAULTS.limits.max_wall_clock_min;
+}
+
+// The run's offline budget in ms: the CLI flag wins, then benchmark.json
+// `limits.offline_budget_min` (top level, else variant.limits — the same
+// resolution writeVariant uses for the caps), then OFFLINE_BUDGET_MS.
+function offlineBudgetMs(config, flagMin) {
+  if (Number.isInteger(flagMin) && flagMin >= 0) {
+    return flagMin * 60_000;
+  }
+  const caps = config.limits || config.variant?.limits || {};
+  if (Number.isInteger(caps.offline_budget_min) && caps.offline_budget_min >= 0) {
+    return caps.offline_budget_min * 60_000;
+  }
+  return OFFLINE_BUDGET_MS;
+}
+
+// The worker's own one-line verdict on stdout (worker/index.cjs):
+//   `verity-worker: <run-id> <outcome> — <result>`, or the no-run forms
+//   `verity-worker: idle — …` / `verity-worker: locked — …`.
+// The LAST such line wins. Notes/warnings (`verity-worker: note: …`) never
+// match: their first token ends in ':'. Absent ⇒ nulls (a crashed or killed
+// tick printed no verdict — never a guessed one).
+const WORKER_RUN_LINE_RE = /^verity-worker: ([^\s:]+) ([a-z_-]+) — /;
+const WORKER_IDLE_LINE_RE = /^verity-worker: (idle|locked) — /;
+
+function parseWorkerSummary(stdout) {
+  let found = { line: null, runId: null, outcome: null };
+  for (const line of String(stdout || '').split('\n')) {
+    const run = WORKER_RUN_LINE_RE.exec(line);
+    if (run !== null) {
+      found = { line, runId: run[1], outcome: run[2] };
+      continue;
+    }
+    const idle = WORKER_IDLE_LINE_RE.exec(line);
+    if (idle !== null) {
+      found = { line, runId: null, outcome: idle[1] };
+    }
+  }
+  return found;
+}
+
+// Write one tick's log: a header an operator can read at a glance, then the
+// worker's stdout and stderr. Everything below the header passes through the
+// shared credential redaction (ledger.redact — GitHub token shapes and
+// authorization/bearer/token lines) before it touches disk; the header carries
+// only harness-observed facts (tick number, times, exit code, the verdict
+// line). No environment is ever written: the child's env is passed to spawn,
+// never serialized. Operator-private: dir 0700, file 0600. Best-effort — a
+// write failure never sinks the run (the entry's `log` is then null).
+function writeTickLog(logDir, tick, res) {
+  try {
+    fs.mkdirSync(logDir, { recursive: true, mode: 0o700 });
+    const file = path.join(logDir, `tick-${pad(tick.n, 3)}.log`);
+    const header = [
+      `# verity benchmark tick ${pad(tick.n, 3)}`,
+      `# started_at: ${tick.started_at}`,
+      `# wall_secs: ${tick.wall_secs}`,
+      `# exit_code: ${tick.exit_code === null ? 'none' : tick.exit_code}`,
+      `# tick_outcome: ${tick.tick_outcome}`,
+      `# worker: ${tick.summary_line === null ? '(no verdict line)' : ledger.redact(tick.summary_line)}`,
+    ];
+    const body = [
+      '# ---- stdout ----',
+      ledger.redact(res?.stdout || ''),
+      '# ---- stderr ----',
+      ledger.redact(res?.stderr || ''),
+    ];
+    fs.writeFileSync(file, `${[...header, ...body].join('\n')}\n`, { mode: 0o600 });
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+// ONE `verity-worker --once` tick, bounded and recorded (stage 110). The spawn
+// carries the lock-aligned deadline + SIGTERM, a larger output buffer, and
+// VERITY_GH_LOG=1 so the worker's gh retry/timeout lines land in the tick log.
+// A tick killed at its deadline is tick_outcome 'tick_timeout' (outcome too,
+// unless it managed a verdict line first) and the caller simply moves on: the
+// next tick re-reads state, and the killed tick's lock lapses by TTL.
+// Returns { res, tick } — `res` is the raw spawn result (the plan-tick
+// diagnosis reads its stderr), `tick` the record's `ticks[]` entry.
+function runTick(ctx, n) {
+  const now = typeof ctx.now === 'function' ? ctx.now : Date.now;
+  const t0 = now();
+  const options = {
+    cwd: ctx.dir,
+    encoding: 'utf8',
+    maxBuffer: TICK_MAX_BUFFER,
+    env: { ...process.env, VERITY_GH_LOG: '1' },
+    killSignal: 'SIGTERM',
+    // Always set: without it defaultSpawn's 10-minute step deadline would
+    // apply, which is far shorter than a legitimate tick.
+    timeout:
+      Number.isInteger(ctx.tickTimeoutMs) && ctx.tickTimeoutMs > 0
+        ? ctx.tickTimeoutMs
+        : tickTimeoutMs(autonomy.DEFAULTS.limits.max_wall_clock_min),
+  };
+  const res = ctx.spawn('verity-worker', ['--repo', ctx.repo, '--once'], options);
+  const t1 = now();
+  const summary = parseWorkerSummary(res?.stdout);
+  const timedOut = res?.error?.code === 'ETIMEDOUT';
+  const tick = {
+    n,
+    started_at: new Date(t0).toISOString(),
+    wall_secs: Math.max(0, Math.round((t1 - t0) / 1000)),
+    exit_code: typeof res?.status === 'number' ? res.status : null,
+    worker_run_id: summary.runId,
+    outcome: summary.outcome ?? (timedOut ? 'tick_timeout' : null),
+    tick_outcome: timedOut ? 'tick_timeout' : res?.error ? 'spawn_error' : 'exited',
+    log: null,
+  };
+  if (typeof ctx.logDir === 'string' && ctx.logDir !== '') {
+    tick.log = writeTickLog(ctx.logDir, { ...tick, summary_line: summary.line }, res);
+  }
+  return { res, tick };
+}
+
 // Which fixtures a run targets: `--fixture X` narrows to that one; otherwise
 // every fixture in config, minus any explicitly toggled `enabled:false`. A
 // fixture without an `enabled` key is on (matches provision's stage-55 shape).
@@ -919,9 +1126,12 @@ function defaultSnapshotReader(repo, ctx = {}) {
 // operator surface does not already report):
 //   gated   a human gate is present (needs_human / awaiting_approval bucket) —
 //           the run stops HERE and never bypasses it (ADR-0025 §4)
+//   offline the snapshot says `online: false` — the read FAILED (stage 110).
+//           Never "done" (an unobserved queue is not drained); the drive loop
+//           waits it out instead of spending ticks on an outage it cannot fix
 //   done    no next action AND the active pipeline buckets are drained
-//   working otherwise (including an offline/unknown read — keep driving until
-//           the tick cap rather than call an unobserved queue "done")
+//   working otherwise (including an unknown read — keep driving until the
+//           tick cap rather than call an unobserved queue "done")
 function driveStatus(snap) {
   if (!snap || typeof snap !== 'object') {
     return 'working';
@@ -930,6 +1140,9 @@ function driveStatus(snap) {
   const num = (v) => (typeof v === 'number' ? v : 0);
   if (num(q.needs_human) > 0 || num(q.awaiting_approval) > 0) {
     return 'gated';
+  }
+  if (snap.online === false) {
+    return 'offline';
   }
   const active = num(q.ready) + num(q.in_progress) + num(q.waiting_for_ci);
   const noNext = snap.next === null || snap.next === undefined;
@@ -951,16 +1164,37 @@ function driveStatus(snap) {
 // never costs an extra `operator snapshot` read. Absent, the loop reads every
 // pass as before. `ctx.initialTicks` seeds the tick counter so the plan tick
 // run() already spent counts against the same tick budget (default 0).
+//
+// Stage 110: an `offline` snapshot (a failed read) neither spawns nor counts a
+// tick. The loop sleeps with bounded backoff (the drive wait, doubling to
+// OFFLINE_MAX_WAIT_MS) and re-reads; once one outage has lasted
+// `ctx.offlineBudgetMs` it stops with 'offline'. Every tick it does spawn is
+// bounded (`ctx.tickTimeoutMs`, see runTick) and recorded in `tickLog`.
+// `ctx.now` (ms clock) is injectable for the offline accounting and tick
+// timing; `ctx.logDir` names where tick logs go (absent ⇒ none written).
 function drivePipeline(ctx) {
   const { repo, dir, spawn, snapshotReader, maxTicks } = ctx;
   // Stage 68 (ADR-0027): between-tick wait while CI is registering — injectable
   // (a no-op in the suite), a real bounded blocking sleep in production.
   const sleep = typeof ctx.sleep === 'function' ? ctx.sleep : blockingSleep;
   const waitMs = Number.isInteger(ctx.waitMs) && ctx.waitMs >= 0 ? ctx.waitMs : DRIVE_CI_WAIT_MS;
+  const now = typeof ctx.now === 'function' ? ctx.now : Date.now;
+  const budgetMs =
+    Number.isInteger(ctx.offlineBudgetMs) && ctx.offlineBudgetMs >= 0
+      ? ctx.offlineBudgetMs
+      : OFFLINE_BUDGET_MS;
   let ticks = Number.isInteger(ctx.initialTicks) ? ctx.initialTicks : 0;
   let stopReason = null;
   let finalSnap = null;
   let pendingSnap = ctx.firstSnap;
+  const tickLog = [];
+  let offlineWaits = 0;
+  let offlineMs = 0;
+  // The current outage, if any: when it started, what it has slept, the next
+  // wait. The outage's length is the larger of the clock span and the time
+  // slept — so a frozen/injected clock still reaches the budget.
+  let outage = null;
+  const outageMs = () => (outage === null ? 0 : Math.max(now() - outage.start, outage.slept));
   while (stopReason === null) {
     if (pendingSnap !== undefined) {
       finalSnap = pendingSnap;
@@ -969,6 +1203,26 @@ function drivePipeline(ctx) {
       finalSnap = snapshotReader(repo, { spawn, cwd: dir });
     }
     const status = driveStatus(finalSnap);
+    if (status === 'offline') {
+      if (outage === null) {
+        outage = { start: now(), slept: 0, nextWait: Math.max(1, waitMs) };
+      }
+      if (outageMs() >= budgetMs) {
+        offlineMs += outageMs();
+        outage = null;
+        stopReason = 'offline';
+        continue;
+      }
+      sleep(outage.nextWait);
+      offlineWaits += 1;
+      outage.slept += outage.nextWait;
+      outage.nextWait = Math.min(outage.nextWait * 2, OFFLINE_MAX_WAIT_MS);
+      continue;
+    }
+    if (outage !== null) {
+      offlineMs += outageMs();
+      outage = null;
+    }
     if (status === 'done') {
       stopReason = 'done';
     } else if (status === 'gated') {
@@ -986,11 +1240,19 @@ function drivePipeline(ctx) {
       if (waiting && typeof waiting.waiting_for_ci === 'number' && waiting.waiting_for_ci > 0) {
         sleep(waitMs);
       }
-      spawn('verity-worker', ['--repo', repo, '--once'], { cwd: dir, encoding: 'utf8' });
+      const { tick } = runTick(ctx, ticks + 1);
+      tickLog.push(tick);
       ticks += 1;
     }
   }
-  return { ticks, stopReason, finalSnap };
+  return {
+    ticks,
+    stopReason,
+    finalSnap,
+    tickLog,
+    offlineWaits,
+    offlineSecs: Math.round(offlineMs / 1000),
+  };
 }
 
 // The run's outcome (ADR-0025 §5 — read from the snapshot / final state). A gate
@@ -1001,7 +1263,7 @@ function outcomeFrom(snap, stopReason) {
   if (stopReason === 'gated') {
     return 'gated';
   }
-  if (stopReason === 'max_ticks') {
+  if (stopReason === 'max_ticks' || stopReason === 'offline') {
     return 'incomplete';
   }
   const observed = snap?.worker?.last_outcome;
@@ -1174,6 +1436,25 @@ function run(opts = {}) {
       // (greenfield) or already committed (in-flight).
       writeVariant(dir, config);
 
+      // Stage 110: the per-tick plumbing both modes share — the run id the
+      // record will carry (so the tick logs are filed under it from tick 1),
+      // the lock-aligned tick deadline read from the policy just written, the
+      // offline budget, and the injectable ms clock for tick/offline timing.
+      const runId = `${entry.repo.split('/').pop()}-run${i + 1}`;
+      const tickCtx = {
+        repo: entry.repo,
+        dir,
+        spawn,
+        now: typeof opts.now === 'function' ? opts.now : undefined,
+        logDir: path.join(
+          opts.logsRoot || path.join(os.homedir(), '.verity', 'logs'),
+          `benchmark-${runId}`,
+        ),
+        tickTimeoutMs: tickTimeoutMs(effectiveWallClockMin(dir)),
+      };
+      const driveBudgetMs = offlineBudgetMs(config, opts.offlineBudgetMin);
+      const planTicks = [];
+
       // Stage 83 (ADR-0029): on the local substrate the variant policy is part
       // of the repo's COMMITTED state — the stage-82 gate runner refuses on ANY
       // dirty tree (SHA-pinned record honesty), so an uncommitted
@@ -1274,9 +1555,8 @@ function run(opts = {}) {
         // greenfield uses 1 because its plan tick counts. Same stop conditions
         // (done / gated / max_ticks); the gate is NEVER bypassed.
         drive = drivePipeline({
-          repo: entry.repo,
-          dir,
-          spawn,
+          ...tickCtx,
+          offlineBudgetMs: driveBudgetMs,
           snapshotReader,
           maxTicks,
           firstSnap,
@@ -1446,10 +1726,10 @@ function run(opts = {}) {
         // NOT via the snapshot. So DRIVE THE FIRST (plan) TICK before concluding
         // anything, then judge from the OBSERVED post-plan state. This is also what
         // stops the drive loop from terminating at tick 0 for a real fresh request.
-        const planTick = spawn('verity-worker', ['--repo', entry.repo, '--once'], {
-          cwd: dir,
-          encoding: 'utf8',
-        });
+        // Stage 110: the plan tick is a worker tick like any other — bounded
+        // by the same lock-aligned deadline and logged as tick-001.
+        const { res: planTick, tick: planTickEntry } = runTick(tickCtx, 1);
+        planTicks.push(planTickEntry);
         const postPlanSnap = snapshotReader(entry.repo, { spawn, cwd: dir });
 
         // If the snapshot is STILL terminal-idle AFTER the plan tick — no stages
@@ -1482,9 +1762,8 @@ function run(opts = {}) {
         // it counts toward the tick budget (initialTicks:1); the post-plan read
         // is threaded as the loop's first snapshot, not re-read.
         drive = drivePipeline({
-          repo: entry.repo,
-          dir,
-          spawn,
+          ...tickCtx,
+          offlineBudgetMs: driveBudgetMs,
           snapshotReader,
           maxTicks,
           firstSnap: postPlanSnap,
@@ -1508,9 +1787,8 @@ function run(opts = {}) {
       const rows = led && Array.isArray(led.rows) ? led.rows : [];
       const { scorecard, by_role } = collectScorecard(rows, timeSecs);
 
-      const slug = entry.repo.split('/').pop();
       const record = {
-        run_id: `${slug}-run${i + 1}`,
+        run_id: runId,
         started_at: startedAt.toISOString(),
         completed_at: completedAt.toISOString(),
         variant: config.variant ?? null,
@@ -1521,6 +1799,12 @@ function run(opts = {}) {
         scorecard,
         by_role,
         human_grade: null,
+        // Stage 110 (additive): every worker tick this run spawned — the plan
+        // tick included — with its bounded outcome and its log file; plus the
+        // snapshot-read outage the drive loop waited out instead of ticking.
+        ticks: [...planTicks, ...drive.tickLog],
+        offline_waits: drive.offlineWaits,
+        offline_secs: drive.offlineSecs,
       };
       writeRecord(record, opts, repoRoot);
       results.push(record);
@@ -1531,7 +1815,8 @@ function run(opts = {}) {
 }
 
 // CLI: `verity benchmark provision --config <path> [--fixture D]` and
-// `benchmark run --config <path> [--fixture D] [--max-ticks N]`. The surface is
+// `benchmark run --config <path> [--fixture D] [--max-ticks N]
+// [--offline-budget-min N]`. The surface is
 // dark/opt-in — a dark or malformed config is reported honestly, never crashed
 // past.
 function dispatch(rest = [], flags = {}) {
@@ -1561,7 +1846,20 @@ function dispatch(rest = [], flags = {}) {
       };
     }
     const maxTicks = flags['max-ticks'] !== undefined ? Number(flags['max-ticks']) : undefined;
-    return run({ config, fixture: flags.fixture, maxTicks, cwd: flags.cwd });
+    // Stage 110: `--offline-budget-min N` — how long the drive loop waits out
+    // an unreadable snapshot before stopping 'offline'. A malformed value is
+    // surfaced, never silently defaulted.
+    let offlineBudgetMin;
+    if (flags['offline-budget-min'] !== undefined) {
+      offlineBudgetMin = Number(flags['offline-budget-min']);
+      if (!Number.isInteger(offlineBudgetMin) || offlineBudgetMin < 0) {
+        return {
+          ok: false,
+          reason: `--offline-budget-min must be a non-negative integer (minutes), got '${flags['offline-budget-min']}'`,
+        };
+      }
+    }
+    return run({ config, fixture: flags.fixture, maxTicks, offlineBudgetMin, cwd: flags.cwd });
   }
   return {
     ok: false,
@@ -1590,4 +1888,11 @@ module.exports = {
   // real drive loop's reader, no test-only override) works against a
   // local-substrate repo with zero gh, and that the github argv stays pinned.
   defaultSnapshotReader,
+  // Stage 110: the tick deadline / offline-budget resolution and the worker
+  // verdict parser, exported so the suite pins them directly.
+  tickTimeoutMs,
+  offlineBudgetMs,
+  parseWorkerSummary,
+  OFFLINE_BUDGET_MS,
+  OFFLINE_MAX_WAIT_MS,
 };

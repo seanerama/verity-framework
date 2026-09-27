@@ -3,6 +3,7 @@
 // approval + confirmed-green CI IS the integration gate — so `merge` REFUSES on red.
 const { execFileSync } = require('node:child_process');
 
+const gh = require('./gh.cjs');
 const stage = require('./stage.cjs');
 const contract = require('./contract.cjs');
 const ledger = require('./ledger.cjs');
@@ -38,10 +39,14 @@ function canMerge(ciGreen) {
 // nothing — and unknown never merges, exactly as the old `false` never did.
 function ciStateFor(pr, cwd) {
   try {
+    // Stage 110: bounded like every gh call (gh.GH_TIMEOUT_MS) — a hung read is
+    // a failed read, and a failed read is already 'unknown' below.
     const out = execFileSync('gh', ['pr', 'view', String(pr), '--json', 'statusCheckRollup'], {
       encoding: 'utf8',
       cwd,
       stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: gh.GH_TIMEOUT_MS,
+      killSignal: 'SIGTERM',
     });
     return ledger.rollupState(JSON.parse(out).statusCheckRollup || []);
   } catch {
@@ -113,9 +118,14 @@ function merge(cwd, pr, flags) {
     substrateLocal.mergeLocalPr(cwd, pr);
     return { pr, merged: true };
   }
+  // Stage 110: bounded, but deliberately NOT routed through gh.run's retry — a
+  // merge is a write, and re-issuing one whose first attempt may have landed is
+  // not a transient retry. A timeout throws, and the caller sees a failed merge.
   execFileSync('gh', ['pr', 'merge', String(pr), '--squash', '--delete-branch'], {
     stdio: 'inherit',
     cwd,
+    timeout: gh.GH_TIMEOUT_MS,
+    killSignal: 'SIGTERM',
   });
   return { pr, merged: true };
 }

@@ -1,4 +1,5 @@
-// Usage ledger — `.verity/usage.csv` + `verity usage` CLI (T11, SKETCH §3.4)
+// Usage ledger — `<git-dir>/verity/usage.csv` (`.verity/usage.csv` outside git;
+// stage 108, see RUNTIME STATE below) + `verity usage` CLI (T11, SKETCH §3.4)
 // and the daily-limit rollup the worker's §4.1 startup check consumes.
 //
 // CSV contract (§3.4, extended by stages 3 and 21): header row REQUIRED,
@@ -72,11 +73,31 @@
 // refuses to clear a budget it cannot see all of. A non-empty but unparsable
 // cell is a MALFORMED row exactly as before — "unknown" never means "corrupt".
 //
-// The optional git commit (`chore(verity): usage <run-id>`, policy
-// `commit_usage: true`, default true) commits ONLY the csv path and NEVER
-// throws — a failed commit (not a repo, no git identity, etc.) is reported in
-// the return value for the caller to log; the run's outcome must not change.
-const { execFileSync } = require('node:child_process');
+// RUNTIME STATE, NEVER COMMITTED, IN THE GIT DIRECTORY (stage 108, ADR-0036
+// as amended): before 108 `record` committed the ledger
+// (`chore(verity): usage <run-id>`) on whatever branch HEAD was on — the stage
+// branch the run built on — and the next tick's fresh stage branch, forked
+// from the squash-merged default branch, silently reverted the file (9 of 14
+// rows lost on the fixture-A benchmark run). An ignored working-tree file is
+// not enough: git overwrites it whenever the checkout target still tracks the
+// path. So the ledger lives where no checkout, merge, reset, clean or stash
+// can reach it:
+//   - `ledgerPath(cwd)` (alias `usagePath`) → `<git-dir>/verity/usage.csv`
+//     (`git rev-parse --git-dir`, absolute, per-worktree by construction);
+//     `<cwd>/.verity/usage.csv` only when cwd is not inside a git repository.
+//     EVERY reader and writer resolves the file through it;
+//   - `record` appends only — no git at all; policy `commit_usage` is ignored
+//     (autonomy.cjs warns when it is set true);
+//   - `recoverLedger` (`verity usage recover`, and the worker's one-time seed
+//     via `seedLedger`) unions the sidecar, the legacy working-tree file and
+//     every historical `chore(verity): usage` commit into the SIDECAR — git
+//     reads only, the working tree is never written;
+//   - `untrackLedger` (`verity usage untrack`, operator-only — the worker never
+//     calls it) stops tracking the stale in-tree file with one plumbing-built
+//     bot commit, shipped as an ordinary reviewed change;
+//   - the scaffold .gitignore still ignores `.verity/usage.csv` from birth, so
+//     a stray in-tree ledger is never committed.
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -111,11 +132,73 @@ const LEGACY_HEADER = LEGACY_COLUMNS.join(',');
 // this — single source, because checkDailyLimits below matches gate cells
 // against it). ADR-0008.
 const UNKNOWN_COST_GATE = 'unknown-cost';
+// The in-tree ledger path: the live ledger outside a git repository, the
+// legacy (pre-108) location inside one — `recover` still reads it there.
 const CSV_REL_PATH = path.join('.verity', 'usage.csv');
+// The same path as git spells it (pathspecs, `<rev>:<path>` blobs, .gitignore).
+const LEDGER_GIT_PATH = '.verity/usage.csv';
+// Stage 108 (ADR-0036): the ignore line + its comment, as the scaffold template,
+// `untrack` and every ensureIgnoreLine() caller write them.
+const LEDGER_IGNORE_COMMENT =
+  '# Verity usage ledger: runtime state, never committed (stage 108, ADR-0036)';
+const LEDGER_IGNORE_LINE = LEDGER_GIT_PATH;
+// The one commit `verity usage untrack` makes. Distinct from the pre-108
+// per-run subject (`chore(verity): usage <run-id>`) by its fixed text, which
+// recoverLedger excludes by exact match.
+const MIGRATION_MESSAGE = 'chore(verity): usage ledger is runtime state (stage 108, ADR-0036)';
+// What every pre-108 ledger commit's subject starts with (recover's grep).
+const USAGE_COMMIT_GREP = '^chore(verity): usage ';
 
-function usagePath(cwd) {
-  return path.join(cwd, CSV_REL_PATH);
+// The sidecar's place inside the git directory (stage 108, ADR-0036 amended).
+const SIDECAR_REL_PATH = path.join('verity', 'usage.csv');
+
+// The git directory for `cwd` (absolute), or null when cwd is not inside a git
+// repository. The answer is read from git's OUTPUT and must name an existing
+// directory, so a stand-in `git` that exits 0 for anything (test stubs,
+// wrappers) reads as "not a repository", never as a bogus location.
+function resolveGitDir(cwd) {
+  const res = git(cwd, ['rev-parse', '--git-dir']);
+  const out = res.ok ? res.stdout.trim() : '';
+  if (out === '' || out.includes('\n')) {
+    return null;
+  }
+  const abs = path.resolve(cwd, out);
+  try {
+    return fs.statSync(abs).isDirectory() ? abs : null;
+  } catch {
+    return null;
+  }
 }
+
+// cwd (resolved) → sidecar path, for the process lifetime. Only a git answer
+// is cached: a non-git cwd is re-probed, so a directory that becomes a
+// repository later (`git init`) is never pinned to the working-tree fallback.
+const ledgerPathCache = new Map();
+
+// THE single resolver every ledger reader and writer uses (stage 108,
+// ADR-0036 amended): `<git-dir>/verity/usage.csv` inside a git repository
+// (never touched by checkout/merge/reset/clean/stash, and per-worktree — a
+// `git worktree add` checkout gets its own); `<cwd>/.verity/usage.csv`, exactly
+// as before, outside one. Pure path resolution — the directory is created on
+// write (appendUsage / writeLedgerFile), never here.
+function ledgerPath(cwd) {
+  const key = path.resolve(cwd);
+  const hit = ledgerPathCache.get(key);
+  if (hit !== undefined) {
+    return hit;
+  }
+  const gitDir = resolveGitDir(key);
+  if (gitDir === null) {
+    return path.join(cwd, CSV_REL_PATH);
+  }
+  const file = path.join(gitDir, SIDECAR_REL_PATH);
+  ledgerPathCache.set(key, file);
+  return file;
+}
+
+// The historical name; every existing caller keeps working and resolves the
+// same file.
+const usagePath = ledgerPath;
 
 // --- CSV encode/decode (RFC 4180 subset; zero-dep) ---------------------------
 
@@ -229,51 +312,33 @@ function appendUsage(cwd, entry) {
   return { path: file, row };
 }
 
-// The bot identity the ledger commit attributes itself to. This commit is the
-// WORKER's own action, so it carries a stable non-human identity rather than
-// depending on ambient git config — which is UNSET on a fresh CI runner (the
-// generated verity-worker.yml sets none), where the commit would otherwise die
-// with "Author identity unknown" and the priced audit ledger would silently
-// never be committed (#3). The email is a GitHub noreply address: safe and
-// non-routable. A single `-c user.name`/`-c user.email` pair sets BOTH the
-// author and the committer, and `-c` scopes it to this one command — it never
-// mutates the user's git config.
+// The bot identity every ENGINE-owned commit attributes itself to (the
+// operator-run `verity usage untrack` commit uses it too). Such a
+// commit is the WORKER's own action, so it carries a stable non-human identity
+// rather than depending on ambient git config — which is UNSET on a fresh CI
+// runner (the generated verity-worker.yml sets none), where the commit would
+// otherwise die with "Author identity unknown" (#3). The email is a GitHub
+// noreply address: safe and non-routable. A single `-c user.name`/`-c
+// user.email` pair sets BOTH the author and the committer, and `-c` scopes it
+// to this one command — it never mutates the user's git config.
 const COMMIT_AUTHOR_NAME = 'verity-worker';
 const COMMIT_AUTHOR_EMAIL = 'verity-worker@users.noreply.github.com';
 
-// The scoped-identity argv prefix every ENGINE-owned commit uses — the ledger
-// commit below and, since stage 96 (ADR-0033), the intent-artifacts commit
-// (agents/intent-artifacts.cjs). One definition, so the two can never drift.
+// The scoped-identity argv prefix every ENGINE-owned commit uses — since stage
+// 96 (ADR-0033) the intent-artifacts commit (agents/intent-artifacts.cjs), and
+// since stage 108 (ADR-0036) the operator's `verity usage untrack` commit
+// below. (The per-run ledger commit that introduced it in stage 38 is gone:
+// the ledger is runtime state.) One definition, so the commits can never drift.
 function botIdentityGitArgs() {
   return ['-c', `user.name=${COMMIT_AUTHOR_NAME}`, '-c', `user.email=${COMMIT_AUTHOR_EMAIL}`];
 }
 
-// `git add` + `git commit` of ONLY the csv path, message
-// `chore(verity): usage <run-id>`, authored by the bot identity above so it
-// succeeds regardless of the ambient git config. Never throws: returns
-// { committed: true } or { committed: false, error } — callers log and continue
-// (a broken git setup must never fail the run).
-function commitUsage(cwd, runId) {
-  const message = `chore(verity): usage ${runId}`;
-  try {
-    execFileSync('git', ['-C', cwd, 'add', '--', CSV_REL_PATH], { stdio: 'pipe' });
-    execFileSync(
-      'git',
-      ['-C', cwd, ...botIdentityGitArgs(), 'commit', '-m', message, '--', CSV_REL_PATH],
-      { stdio: 'pipe' },
-    );
-    return { committed: true, message };
-  } catch (err) {
-    const stderr = err.stderr ? String(err.stderr).trim() : '';
-    return { committed: false, message, error: stderr.split('\n')[0] || err.message };
-  }
-}
-
 // One-call write side for the worker: append one row per role invocation
 // (summary.invocations, sharing the summary's run_id) — or the single
-// run-level fallback row when the run invoked no roles — then commit ONCE
-// when the policy says so. The append can throw (disk full etc. — caller's
-// choice); the commit never does.
+// run-level fallback row when the run invoked no roles. Appends to
+// ledgerPath(cwd) and does NOTHING with git (stage 108, ADR-0036): `opts.commit`
+// / policy `commit_usage` are ignored. The append can throw (disk full etc. —
+// caller's choice).
 function record(cwd, summary, opts = {}) {
   const now = opts.now || new Date();
   const invocations = Array.isArray(summary.invocations) ? summary.invocations : [];
@@ -285,18 +350,79 @@ function record(cwd, summary, opts = {}) {
   for (const entry of entries) {
     appended = appendUsage(cwd, entry);
   }
-  const wantCommit = opts.commit !== false;
-  const commit = wantCommit ? commitUsage(cwd, summary.runId) : { committed: false };
   return {
     path: appended.path,
     row: appended.row,
     rows: entries.length,
-    committed: commit.committed,
-    commitError: commit.error || null,
   };
 }
 
 // --- read / rollup (the CLI and the §4.1 daily-limit check) -------------------
+
+function isHeaderLine(line) {
+  return (
+    line === HEADER || line === STAGE21_HEADER || line === STAGE3_HEADER || line === LEGACY_HEADER
+  );
+}
+
+// One data line → the parsed row object, or null when it is malformed (wrong
+// column count, unparsable numbers/timestamp). The single row validator:
+// readUsage skips a null, recoverLedger refuses to import one.
+function parseRowLine(line) {
+  const cells = splitCsvLine(line);
+  // Additive-only evolution: 9-column (pre-stage-3), 11-column (pre-stage-21)
+  // and 12-column (pre-stage-53) rows are as valid as current ones — the
+  // missing trailing cells read as tool_calls=0, role='', gate='',
+  // provider='', model=''.
+  if (
+    cells === null ||
+    (cells.length !== COLUMNS.length &&
+      cells.length !== STAGE21_COLUMNS.length &&
+      cells.length !== STAGE3_COLUMNS.length &&
+      cells.length !== LEGACY_COLUMNS.length)
+  ) {
+    return null;
+  }
+  const row = {};
+  for (let c = 0; c < COLUMNS.length; c += 1) {
+    row[COLUMNS[c]] = cells[c] ?? '';
+  }
+  const ts = Date.parse(row.timestamp);
+  const tokensIn = Number(row.tokens_in);
+  const tokensOut = Number(row.tokens_out);
+  // '' is UNKNOWN cost (null), never 0 — see the header note. Anything else
+  // that fails to parse stays malformed and skips the row, as it always has.
+  const estUsd = row.est_usd === '' ? null : Number(row.est_usd);
+  const wallSecs = Number(row.wall_secs);
+  const toolCalls = row.tool_calls === '' ? 0 : Number(row.tool_calls);
+  if (
+    Number.isNaN(ts) ||
+    !Number.isFinite(tokensIn) ||
+    !Number.isFinite(tokensOut) ||
+    (estUsd !== null && !Number.isFinite(estUsd)) ||
+    !Number.isFinite(wallSecs) ||
+    !Number.isFinite(toolCalls)
+  ) {
+    return null;
+  }
+  return {
+    timestamp: row.timestamp,
+    ts,
+    run_id: row.run_id,
+    repo: row.repo,
+    roles: row.roles === '' ? [] : row.roles.split('+'),
+    tokens_in: tokensIn,
+    tokens_out: tokensOut,
+    est_usd: estUsd,
+    wall_secs: wallSecs,
+    outcome: row.outcome,
+    tool_calls: toolCalls,
+    role: row.role,
+    gate: row.gate,
+    provider: row.provider,
+    model: row.model,
+  };
+}
 
 // Parse usage.csv → { rows, skipped }. Missing file → empty ledger. Each
 // malformed line is skipped and reported via opts.warn(message) (default:
@@ -316,80 +442,519 @@ function readUsage(cwd, opts = {}) {
     if (line.trim() === '') {
       continue;
     }
-    if (
-      line === HEADER ||
-      line === STAGE21_HEADER ||
-      line === STAGE3_HEADER ||
-      line === LEGACY_HEADER
-    ) {
+    if (isHeaderLine(line)) {
       sawHeader = true; // header row (required on line 1; tolerated if repeated)
       continue;
     }
     if (i === 0) {
       warn(`usage.csv line 1: expected header '${HEADER}' — parsing rows anyway`);
     }
-    const cells = splitCsvLine(line);
-    // Additive-only evolution: 9-column (pre-stage-3), 11-column (pre-stage-21)
-    // and 12-column (pre-stage-53) rows are as valid as current ones — the
-    // missing trailing cells read as tool_calls=0, role='', gate='',
-    // provider='', model=''.
-    if (
-      cells === null ||
-      (cells.length !== COLUMNS.length &&
-        cells.length !== STAGE21_COLUMNS.length &&
-        cells.length !== STAGE3_COLUMNS.length &&
-        cells.length !== LEGACY_COLUMNS.length)
-    ) {
+    const row = parseRowLine(line);
+    if (row === null) {
       skipped += 1;
       warn(`usage.csv line ${i + 1}: malformed row skipped`);
       continue;
     }
-    const row = {};
-    for (let c = 0; c < COLUMNS.length; c += 1) {
-      row[COLUMNS[c]] = cells[c] ?? '';
-    }
-    const ts = Date.parse(row.timestamp);
-    const tokensIn = Number(row.tokens_in);
-    const tokensOut = Number(row.tokens_out);
-    // '' is UNKNOWN cost (null), never 0 — see the header note. Anything else
-    // that fails to parse stays malformed and skips the row, as it always has.
-    const estUsd = row.est_usd === '' ? null : Number(row.est_usd);
-    const wallSecs = Number(row.wall_secs);
-    const toolCalls = row.tool_calls === '' ? 0 : Number(row.tool_calls);
-    if (
-      Number.isNaN(ts) ||
-      !Number.isFinite(tokensIn) ||
-      !Number.isFinite(tokensOut) ||
-      (estUsd !== null && !Number.isFinite(estUsd)) ||
-      !Number.isFinite(wallSecs) ||
-      !Number.isFinite(toolCalls)
-    ) {
-      skipped += 1;
-      warn(`usage.csv line ${i + 1}: malformed row skipped`);
-      continue;
-    }
-    rows.push({
-      timestamp: row.timestamp,
-      ts,
-      run_id: row.run_id,
-      repo: row.repo,
-      roles: row.roles === '' ? [] : row.roles.split('+'),
-      tokens_in: tokensIn,
-      tokens_out: tokensOut,
-      est_usd: estUsd,
-      wall_secs: wallSecs,
-      outcome: row.outcome,
-      tool_calls: toolCalls,
-      role: row.role,
-      gate: row.gate,
-      provider: row.provider,
-      model: row.model,
-    });
+    rows.push(row);
   }
   if (!sawHeader && rows.length === 0 && skipped === 0) {
     warn('usage.csv: empty file without header — treating as empty ledger');
   }
   return { path: file, exists: true, rows, skipped };
+}
+
+// --- runtime-state maintenance (stage 108, ADR-0036) ----------------------------
+
+// Every non-empty, non-header line of a ledger text, verbatim (full-line
+// identity is how rows are unioned — a row is immutable once appended).
+function dataLines(text) {
+  return String(text)
+    .split(/\r?\n/)
+    .filter((l) => l.trim() !== '' && !isHeaderLine(l));
+}
+
+// A ledger file's data lines ([] when the file is absent).
+function fileDataLines(file) {
+  return fs.existsSync(file) ? dataLines(fs.readFileSync(file, 'utf8')) : [];
+}
+
+// The live ledger's data lines (ledgerPath(cwd)).
+function ledgerDataLines(cwd) {
+  return fileDataLines(ledgerPath(cwd));
+}
+
+// Sort key: the timestamp cell (ISO-8601, never quoted). A line whose
+// timestamp does not parse sorts last — it is kept, never dropped.
+function lineTs(line) {
+  const ts = Date.parse(line.slice(0, line.indexOf(',')));
+  return Number.isNaN(ts) ? Number.POSITIVE_INFINITY : ts;
+}
+
+// Rewrite a ledger file as HEADER + `lines` sorted by timestamp (stable: ties
+// keep their input order). HEADER reads every older row width
+// (additive-only), so a legacy-headed file loses nothing by gaining the
+// current header. Creates the parent directory (the sidecar's `verity/`).
+function writeLedgerFile(file, lines) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const sorted = lines
+    .map((line, i) => ({ line, i, ts: lineTs(line) }))
+    .sort((a, b) => (a.ts === b.ts ? a.i - b.i : a.ts < b.ts ? -1 : 1))
+    .map((e) => e.line);
+  fs.writeFileSync(file, `${[HEADER, ...sorted].join('\n')}\n`);
+}
+
+// Does a .gitignore text already ignore the ledger by an explicit line?
+function hasIgnoreLine(text) {
+  return String(text)
+    .split(/\r?\n/)
+    .some((l) => l.trim() === LEDGER_IGNORE_LINE || l.trim() === `/${LEDGER_IGNORE_LINE}`);
+}
+
+// `text` with the ADR-0036 ignore line (and its comment) appended unless it is
+// already there — the one spelling the template, `untrack` and the benchmark
+// provisioner all share.
+function withIgnoreLine(text) {
+  if (hasIgnoreLine(text)) {
+    return text;
+  }
+  const sep = text === '' || text.endsWith('\n') ? '' : '\n';
+  return `${text}${sep}${LEDGER_IGNORE_COMMENT}\n${LEDGER_IGNORE_LINE}\n`;
+}
+
+// Append the ignore line to an ignore FILE unless it is already there.
+// Idempotent; creates the file when absent. Returns true when it wrote. Used
+// by the benchmark provisioner and the no-commits-yet `untrack` path, so no
+// repo ever carries the line twice.
+function ensureIgnoreLine(file) {
+  const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  if (hasIgnoreLine(text)) {
+    return false;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, withIgnoreLine(text));
+  return true;
+}
+
+// Security invariant 1.6: git never prompts (GIT_TERMINAL_PROMPT=0) and every
+// call has a deadline. A timeout surfaces as { ok: false } like any failure.
+// Args are always an array (no shell); `input` feeds stdin (hash-object).
+const GIT_TIMEOUT_MS = 120_000;
+
+function git(cwd, args, extraEnv, input) {
+  const res = spawnSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    stdio: 'pipe',
+    timeout: GIT_TIMEOUT_MS,
+    env: { ...process.env, ...extraEnv, GIT_TERMINAL_PROMPT: '0' },
+    ...(input === undefined ? {} : { input }),
+  });
+  return {
+    ok: res.status === 0 && !res.error,
+    stdout: res.stdout || '',
+    stderr: (res.stderr || (res.error ? res.error.message : '')).trim(),
+  };
+}
+
+function firstErrLine(res) {
+  return res.stderr.split('\n')[0] || 'unknown error';
+}
+
+const SHA_RE = /^[0-9a-f]{40,64}$/;
+
+// The repository facts every ledger verb needs. `null` when cwd is not inside
+// a git work tree. Every query runs at the TOP level (pathspecs are relative
+// to -C). `inHead` / `inIndex` are the two ways the ledger can be tracked:
+// committed at HEAD, or staged for the next commit. Every answer is read from
+// git's OUTPUT, not just its exit code, so a stand-in `git` that exits 0 for
+// anything reads as "not a repository", never as "tracked".
+function ledgerGitState(cwd) {
+  const top = git(cwd, ['rev-parse', '--show-toplevel']).stdout.trim();
+  if (top === '' || !path.isAbsolute(top) || !fs.existsSync(top)) {
+    return null;
+  }
+  const gitDir = resolveGitDir(top);
+  if (gitDir === null) {
+    return null;
+  }
+  const names = (args) => git(top, args).stdout.split('\n');
+  const head = git(top, ['rev-parse', '--verify', '--quiet', 'HEAD']).stdout.trim();
+  const hasHead = SHA_RE.test(head);
+  return {
+    top,
+    gitDir,
+    head: hasHead ? head : null,
+    hasHead,
+    inHead:
+      hasHead &&
+      names(['ls-tree', '--name-only', 'HEAD', '--', LEDGER_GIT_PATH]).includes(LEDGER_GIT_PATH),
+    inIndex: names(['ls-files', '--', LEDGER_GIT_PATH]).includes(LEDGER_GIT_PATH),
+  };
+}
+
+// Is the in-tree ledger tracked (committed at HEAD or staged)? null = not a
+// git repo. `verity doctor` and the worker's run start warn on true.
+function isLedgerTracked(cwd) {
+  const st = ledgerGitState(cwd);
+  return st === null ? null : st.inHead || st.inIndex;
+}
+
+// F2 (PR #282 review): a commit built while one of these is in progress would
+// silently resolve or abandon it (a MERGE_HEAD turns a plain commit into a
+// two-parent "ours" merge). `untrack` refuses instead. All are per-worktree,
+// so they are looked up in the worktree's own git dir.
+const IN_PROGRESS_MARKERS = [
+  ['MERGE_HEAD', 'a merge is in progress'],
+  ['CHERRY_PICK_HEAD', 'a cherry-pick is in progress'],
+  ['REVERT_HEAD', 'a revert is in progress'],
+  ['rebase-merge', 'a rebase is in progress'],
+  ['rebase-apply', 'a rebase (or git am) is in progress'],
+];
+
+function operationInProgress(gitDir) {
+  for (const [marker, what] of IN_PROGRESS_MARKERS) {
+    if (fs.existsSync(path.join(gitDir, marker))) {
+      return { marker, what };
+    }
+  }
+  return null;
+}
+
+// `<mode> <sha>` of `path` in a tree-ish (ls-tree) or the index (ls-files -s,
+// which prints `<mode> <sha> <stage>`), or null when absent.
+function treeEntry(top, treeish, file) {
+  const line = git(top, ['ls-tree', treeish, '--', file]).stdout.split('\n')[0] || '';
+  const m = /^(\d{6}) blob ([0-9a-f]{40,64})\t/.exec(line);
+  return m ? { mode: m[1], sha: m[2] } : null;
+}
+
+function indexEntry(top, file) {
+  const line = git(top, ['ls-files', '-s', '--', file]).stdout.split('\n')[0] || '';
+  const m = /^(\d{6}) ([0-9a-f]{40,64}) \d\t/.exec(line);
+  return m ? { mode: m[1], sha: m[2] } : null;
+}
+
+// The bot identity as environment too: GIT_AUTHOR_*/GIT_COMMITTER_* in the
+// operator's environment would otherwise outrank the `-c user.*` pair.
+function botIdentityEnv() {
+  return {
+    GIT_AUTHOR_NAME: COMMIT_AUTHOR_NAME,
+    GIT_AUTHOR_EMAIL: COMMIT_AUTHOR_EMAIL,
+    GIT_COMMITTER_NAME: COMMIT_AUTHOR_NAME,
+    GIT_COMMITTER_EMAIL: COMMIT_AUTHOR_EMAIL,
+  };
+}
+
+// The untrack commit, built with plumbing (F3/F4): a temporary index seeded
+// from HEAD gets exactly two edits — `.gitignore` := HEAD's `.gitignore` + the
+// ignore line (a blob hashed from HEAD's text, never the working file, so no
+// unrelated staged or unstaged edit is swept in), and the ledger removed —
+// then write-tree / commit-tree -p HEAD (bot identity) / update-ref on the
+// current branch with HEAD as the expected old value. No porcelain commit, so
+// no hook runs (update-ref is pointed at an empty hooks path too). Returns
+// { commit, ignoreAdded, newIgnore } or { error }; `commit` is null when the
+// resulting tree equals HEAD's (staged-only ledger, ignore line present).
+function buildUntrackCommit(st) {
+  const { top, gitDir, head } = st;
+  const headIgnore = treeEntry(top, head, '.gitignore');
+  const headText = headIgnore === null ? '' : git(top, ['cat-file', 'blob', headIgnore.sha]).stdout;
+  const newText = withIgnoreLine(headText);
+  const ignoreAdded = newText !== headText;
+  let newIgnore = headIgnore;
+  if (ignoreAdded) {
+    const h = git(top, ['hash-object', '-w', '--stdin'], {}, newText);
+    const sha = h.stdout.trim();
+    if (!h.ok || !SHA_RE.test(sha)) {
+      return { error: `git hash-object failed: ${firstErrLine(h)}` };
+    }
+    newIgnore = { mode: headIgnore === null ? '100644' : headIgnore.mode, sha };
+  }
+  const tmpIndex = path.join(gitDir, 'verity-untrack.index');
+  const env = { GIT_INDEX_FILE: tmpIndex };
+  try {
+    fs.rmSync(tmpIndex, { force: true });
+    const steps = [['read-tree', head]];
+    if (ignoreAdded) {
+      steps.push([
+        'update-index',
+        '--add',
+        '--cacheinfo',
+        `${newIgnore.mode},${newIgnore.sha},.gitignore`,
+      ]);
+    }
+    steps.push(['update-index', '--force-remove', '--', LEDGER_GIT_PATH]);
+    for (const args of steps) {
+      const r = git(top, args, env);
+      if (!r.ok) {
+        return { error: `git ${args[0]} failed: ${firstErrLine(r)}` };
+      }
+    }
+    const wt = git(top, ['write-tree'], env);
+    const tree = wt.stdout.trim();
+    if (!wt.ok || !SHA_RE.test(tree)) {
+      return { error: `git write-tree failed: ${firstErrLine(wt)}` };
+    }
+    if (tree === git(top, ['rev-parse', `${head}^{tree}`]).stdout.trim()) {
+      return {
+        commit: null,
+        ignoreAdded: false,
+        headText,
+        newText: headText,
+        headIgnore,
+        newIgnore,
+      };
+    }
+    const ct = git(
+      top,
+      [...botIdentityGitArgs(), 'commit-tree', tree, '-p', head, '-m', MIGRATION_MESSAGE],
+      botIdentityEnv(),
+    );
+    const commit = ct.stdout.trim();
+    if (!ct.ok || !SHA_RE.test(commit)) {
+      return { error: `git commit-tree failed: ${firstErrLine(ct)}` };
+    }
+    const sym = git(top, ['symbolic-ref', '-q', 'HEAD']).stdout.trim();
+    const ref = sym.startsWith('refs/') ? sym : 'HEAD';
+    const noHooks = path.join(gitDir, 'verity-no-hooks');
+    const ur = git(top, [
+      '-c',
+      `core.hooksPath=${noHooks}`,
+      'update-ref',
+      '-m',
+      MIGRATION_MESSAGE,
+      ref,
+      commit,
+      head,
+    ]);
+    if (!ur.ok) {
+      return { error: `git update-ref ${ref} failed: ${firstErrLine(ur)}` };
+    }
+    return { commit, ignoreAdded, headText, newText, headIgnore, newIgnore };
+  } finally {
+    fs.rmSync(tmpIndex, { force: true });
+  }
+}
+
+// `verity usage untrack [--json]` — OPERATOR hygiene (the worker never calls
+// it): stop tracking the stale in-tree `.verity/usage.csv` in one reviewed
+// change. The live ledger is the sidecar (ledgerPath) and is never touched;
+// the working-tree file is never touched either (index-only removal).
+// Idempotent; never throws (a git failure comes back in `error`).
+//
+//   not a repository / not tracked  → nothing written, `changed: false`
+//   merge/cherry-pick/revert/rebase in progress → `ok: false`, `refused`
+//     names the marker (F2) — nothing written
+//   tracked, no commit yet          → unstaged; ignore line in .gitignore
+//   tracked at HEAD or staged       → buildUntrackCommit, then the REAL index
+//     drops the ledger entry (the `git rm --cached` half), and `.gitignore` in
+//     the index / working tree is refreshed from the new HEAD only where it had
+//     no local modification — otherwise it is left alone and the reason says so
+//
+// `changed: true` whenever anything was written (F6).
+function untrackLedger(cwd) {
+  const result = {
+    ok: true,
+    changed: false,
+    tracked: false,
+    ignore_added: false,
+    commit: null,
+    gitignore_refreshed: false,
+    refused: null,
+    error: null,
+    reason: '',
+  };
+  let st;
+  try {
+    st = ledgerGitState(cwd);
+  } catch (err) {
+    st = null;
+    result.error = err.message;
+  }
+  if (st === null) {
+    result.reason = 'not a git repository — nothing to untrack';
+    return result;
+  }
+  result.tracked = st.inHead || st.inIndex;
+  if (!result.tracked) {
+    result.reason = `${LEDGER_GIT_PATH} is not tracked — nothing to do`;
+    return result;
+  }
+  const busy = operationInProgress(st.gitDir);
+  if (busy !== null) {
+    result.ok = false;
+    result.refused = busy.marker;
+    result.reason = `refusing to untrack ${LEDGER_GIT_PATH}: ${busy.what} (${busy.marker} exists in ${st.gitDir}) — finish or abort it, then run \`verity usage untrack\` again`;
+    return result;
+  }
+  const top = st.top;
+  if (!st.hasHead) {
+    // Staged in a repository with no commit yet: unstage it; there is no
+    // history to migrate and no commit to make.
+    const rm = git(top, ['update-index', '--force-remove', '--', LEDGER_GIT_PATH]);
+    if (!rm.ok) {
+      result.ok = false;
+      result.error = `git update-index failed: ${firstErrLine(rm)}`;
+      return result;
+    }
+    try {
+      result.ignore_added = ensureIgnoreLine(path.join(top, '.gitignore'));
+    } catch (err) {
+      result.ok = false;
+      result.error = `could not write .gitignore: ${err.message}`;
+      return result;
+    }
+    result.changed = true;
+    result.reason = `${LEDGER_GIT_PATH} unstaged (no commits yet); ignore line ensured`;
+    return result;
+  }
+  // The real index's .gitignore BEFORE the commit moves HEAD — the "no local
+  // modification" test compares against the OLD head.
+  const indexIgnoreBefore = indexEntry(top, '.gitignore');
+  const built = buildUntrackCommit(st);
+  if (built.error !== undefined) {
+    result.ok = false;
+    result.error = built.error;
+    return result;
+  }
+  // The `--cached` half: the real index stops tracking the ledger (working
+  // file kept). update-index --force-remove never refuses on a working file
+  // that has grown since it was staged, unlike `git rm --cached`.
+  const rm = git(top, ['update-index', '--force-remove', '--', LEDGER_GIT_PATH]);
+  if (!rm.ok) {
+    result.ok = false;
+    result.error = `git update-index (real index) failed: ${firstErrLine(rm)}`;
+    return result;
+  }
+  result.changed = true;
+  result.commit = built.commit;
+  result.ignore_added = built.ignoreAdded;
+  const notes = [];
+  if (built.ignoreAdded) {
+    const same = (a, b) => (a === null ? b === null : b !== null && a.sha === b.sha);
+    if (same(indexIgnoreBefore, built.headIgnore)) {
+      git(top, [
+        'update-index',
+        '--add',
+        '--cacheinfo',
+        `${built.newIgnore.mode},${built.newIgnore.sha},.gitignore`,
+      ]);
+    } else {
+      notes.push('.gitignore has staged changes, left in the index as they were');
+    }
+    const workFile = path.join(top, '.gitignore');
+    const workText = fs.existsSync(workFile) ? fs.readFileSync(workFile, 'utf8') : null;
+    const clean = built.headIgnore === null ? workText === null : workText === built.headText;
+    if (clean) {
+      fs.writeFileSync(workFile, built.newText);
+      result.gitignore_refreshed = true;
+    } else {
+      notes.push(
+        'the working .gitignore has local modifications and was left as it is — the committed one carries the ignore line',
+      );
+    }
+  }
+  const where =
+    built.commit === null
+      ? 'unstaged — it was never committed'
+      : `untracked in ${built.commit.slice(0, 12)}`;
+  result.reason = `${LEDGER_GIT_PATH} ${where} (the working-tree file is kept; the live ledger is ${ledgerPath(cwd)})${
+    notes.length > 0 ? `; ${notes.join('; ')}` : ''
+  }`;
+  return result;
+}
+
+// `verity usage recover` — rebuild the live ledger (the SIDECAR) from every
+// place a pre-108 repo left rows: the sidecar itself (if any), the working-tree
+// `.verity/usage.csv` (tracked or not), and the ledger blob of every
+// `chore(verity): usage <run-id>` commit reachable from ANY local ref
+// (`git log --all`). Rows union by full-line identity and are written back
+// sorted by timestamp with the header first — to the sidecar ONLY; the tree
+// file is read, never written. Idempotent: a second run adds 0 and writes
+// nothing. A commit whose blob is missing, has no recognizable header, or
+// cannot be read is SKIPPED and counted (`commits_skipped`) — never a throw; a
+// malformed row (tree file or blob) is dropped and counted (`rows_skipped`).
+// The untrack commit (MIGRATION_MESSAGE) carries no ledger and is excluded.
+// Git READS only. Benchmark records are never touched.
+function recoverLedger(cwd) {
+  const gitDir = resolveGitDir(cwd);
+  if (gitDir === null) {
+    throw new Error(`usage recover: ${cwd} is not inside a git repository`);
+  }
+  const topOut = git(cwd, ['rev-parse', '--show-toplevel']).stdout.trim();
+  const top = topOut !== '' && path.isAbsolute(topOut) ? topOut : path.resolve(cwd);
+  const log = git(top, ['log', '--all', '--format=%H%x09%s', `--grep=${USAGE_COMMIT_GREP}`]);
+  if (!log.ok) {
+    throw new Error(`usage recover: git log failed: ${firstErrLine(log)}`);
+  }
+  const shas = log.stdout
+    .split('\n')
+    .filter((l) => l !== '')
+    .map((l) => l.split('\t'))
+    .filter(([, subject]) => subject !== MIGRATION_MESSAGE)
+    .map(([sha]) => sha);
+  const file = ledgerPath(cwd);
+  const before = fileDataLines(file);
+  const have = new Set(before);
+  const added = [];
+  let commitsSkipped = 0;
+  let rowsSkipped = 0;
+  const take = (lines) => {
+    for (const line of lines) {
+      if (have.has(line)) {
+        continue;
+      }
+      if (parseRowLine(line) === null) {
+        rowsSkipped += 1;
+        continue;
+      }
+      have.add(line);
+      added.push(line);
+    }
+  };
+  const treeLines = fileDataLines(path.join(top, CSV_REL_PATH));
+  take(treeLines);
+  for (const sha of shas) {
+    const blob = git(top, ['show', `${sha}:${LEDGER_GIT_PATH}`]);
+    const first = blob.ok ? blob.stdout.split(/\r?\n/).find((l) => l.trim() !== '') : undefined;
+    if (!blob.ok || first === undefined || !isHeaderLine(first)) {
+      commitsSkipped += 1;
+      continue;
+    }
+    take(dataLines(blob.stdout));
+  }
+  if (added.length > 0) {
+    writeLedgerFile(file, [...before, ...added]);
+  }
+  return {
+    path: file,
+    commits_scanned: shas.length,
+    commits_skipped: commitsSkipped,
+    tree_rows: treeLines.length,
+    rows_before: before.length,
+    rows_added: added.length,
+    rows_skipped: rowsSkipped,
+    rows_after: before.length + added.length,
+  };
+}
+
+// The worker's run-start step (stage 108, ADR-0036 amended) — git READS only,
+// never a commit, a checkout or a write under the working tree:
+//   - when the sidecar does not exist yet, seed it once by the recover union
+//     (the legacy tree file + every historical usage commit); `seeded` counts
+//     the rows it wrote (0 when there was nothing to seed — then no file is
+//     created, and the next run looks again at the cost of one `git log`);
+//   - `tracked` reports whether the tree still tracks `.verity/usage.csv`, so
+//     the caller can warn, naming `verity usage untrack`.
+// Outside a git repository the ledger IS the tree file: nothing to seed.
+function seedLedger(cwd) {
+  const file = ledgerPath(cwd);
+  if (resolveGitDir(cwd) === null) {
+    return { path: file, git: false, seeded: 0, tracked: false };
+  }
+  let seeded = 0;
+  if (!fs.existsSync(file)) {
+    seeded = recoverLedger(cwd).rows_added;
+  }
+  return { path: file, git: true, seeded, tracked: isLedgerTracked(cwd) === true };
 }
 
 function startOfUtcDay(date) {
@@ -602,13 +1167,48 @@ function checkDailyLimits(cwd, limits, opts = {}) {
 }
 
 // --- CLI: `verity usage [--days 7] [--by-role] [--json]` (§3.4) ---------------
+// (`--json` reports `path`, the resolved live ledger.) Stage 108 (ADR-0036)
+// adds two maintenance verbs:
+//   `verity usage untrack [--json]`  untrackLedger — stop tracking the stale
+//                                    in-tree file (operator-only)
+//   `verity usage recover [--json]`  recoverLedger — union orphaned rows into
+//                                    the sidecar
+
+// --json: exactly the result object (no `raw`), like `usage --json`. A git
+// failure throws (exit 1); an F2 refusal is returned with `ok: false`, which
+// the CLI maps onto exit 1 too.
+function dispatchUntrack(cwd, json) {
+  const res = untrackLedger(cwd);
+  if (res.error !== null) {
+    throw new Error(`usage untrack: ${res.error}`);
+  }
+  return json ? res : { ...res, raw: res.reason };
+}
+
+function dispatchRecover(cwd, json) {
+  const res = recoverLedger(cwd);
+  if (json) {
+    return res;
+  }
+  return {
+    ...res,
+    raw: `path=${res.path} commits_scanned=${res.commits_scanned} tree_rows=${res.tree_rows} rows_before=${res.rows_before} rows_added=${res.rows_added} rows_after=${res.rows_after}`,
+  };
+}
 
 function dispatch(args, flags) {
-  const usageLine = 'verity usage [--days 7] [--by-role] [--json]';
-  if (args.length > 0) {
-    throw new Error(`usage takes no positional arguments — ${usageLine}`);
-  }
+  const usageLine =
+    'verity usage [--days 7] [--by-role] [--json] | verity usage untrack [--json] | verity usage recover [--json]';
   const cwd = flags.cwd || process.cwd();
+  const verb = args[0];
+  if ((verb === 'untrack' || verb === 'recover') && args.length === 1) {
+    return verb === 'untrack' ? dispatchUntrack(cwd, flags.json) : dispatchRecover(cwd, flags.json);
+  }
+  if (args.length > 0) {
+    throw new Error(
+      `usage takes no positional arguments other than the untrack|recover verbs — ${usageLine}`,
+    );
+  }
   let days = 7;
   if (flags.days !== undefined) {
     days = Number(flags.days);
@@ -646,8 +1246,12 @@ module.exports = {
   COMMIT_AUTHOR_NAME,
   CSV_REL_PATH,
   HEADER,
+  LEDGER_GIT_PATH,
+  LEDGER_IGNORE_COMMENT,
+  LEDGER_IGNORE_LINE,
   LEGACY_COLUMNS,
   LEGACY_HEADER,
+  MIGRATION_MESSAGE,
   STAGE3_COLUMNS,
   STAGE3_HEADER,
   STAGE21_COLUMNS,
@@ -656,18 +1260,26 @@ module.exports = {
   appendUsage,
   botIdentityGitArgs,
   checkDailyLimits,
-  commitUsage,
   dispatch,
+  ensureIgnoreLine,
   entryFromInvocation,
   entryFromSummary,
   formatRow,
+  hasIgnoreLine,
+  isLedgerTracked,
+  ledgerDataLines,
+  ledgerPath,
+  parseRowLine,
   readUsage,
   record,
+  recoverLedger,
   rollup,
   rollupByRole,
+  seedLedger,
   splitCsvLine,
   startOfUtcDay,
   summarizeUsage,
   todayTotals,
+  untrackLedger,
   usagePath,
 };

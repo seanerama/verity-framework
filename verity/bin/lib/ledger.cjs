@@ -20,6 +20,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const promotionConfig = require('./promotion-config.cjs');
+const gh = require('./gh.cjs');
 
 function stageDir(cwd) {
   return path.join(cwd, 'stage-instructions');
@@ -252,6 +253,11 @@ function failureReason(err, cwd) {
     // operator off to repair a working install, so the two are told apart here.
     return cwd !== undefined && !fs.existsSync(cwd) ? 'no-target-dir' : 'gh-not-installed';
   }
+  // Stage 110: a read killed at its deadline is a connectivity failure in this
+  // vocabulary (docs/autonomy.md lists the reasons; no new one is added).
+  if (err?.code === 'ETIMEDOUT') {
+    return 'network';
+  }
   const text = `${err?.stderr || ''}\n${err?.message || ''}`;
   if (/rate limit|submitted too quickly/i.test(text)) {
     return 'rate-limit';
@@ -286,12 +292,24 @@ function failureReason(err, cwd) {
 // read the one `--cwd` named — the current repo's issues and PRs projected onto
 // the target's stages, confidently, at exit 0. Any gh read added here later must
 // take it too; tests/ledger-cwd.test.cjs asserts every invocation carries it.
+//
+// Stage 110: every read is bounded by gh.GH_TIMEOUT_MS (killed with SIGTERM) —
+// a hung read on a dead network is a failed read, classified `network` below,
+// never a worker blocked until the connection returns. Not routed through
+// gh.run's retry: this is the operator/scanner read path, which already reports
+// a failure honestly instead of waiting it out.
 function ghJson(args, cwd) {
   try {
     return {
       ok: true,
       data: JSON.parse(
-        execFileSync('gh', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
+        execFileSync('gh', args, {
+          cwd,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: gh.GH_TIMEOUT_MS,
+          killSignal: 'SIGTERM',
+        }),
       ),
     };
   } catch (err) {
@@ -461,6 +479,10 @@ function fetchSnapshot(cwd, opts = {}) {
     tags = execFileSync('git', ['-C', cwd, 'tag'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      // Stage 110: a local read — the local git window, never a prompt.
+      timeout: require('./agents/git-lifecycle.cjs').GIT_LOCAL_TIMEOUT_MS,
+      killSignal: 'SIGTERM',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     })
       .split('\n')
       .filter(Boolean);

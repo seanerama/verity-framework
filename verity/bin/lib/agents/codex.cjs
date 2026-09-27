@@ -9,7 +9,8 @@
 // --output-schema — see buildArgv):
 //   codex exec --json --sandbox <from policy> --output-last-message <file>
 //     --cd <repo root>
-//     -c approval_policy="never" [--ignore-user-config] [--ignore-rules] -
+//     -c approval_policy="never" [--ignore-user-config] [--ignore-rules]
+//     --disable multi_agent [--model <m>] -
 // with the rendered prompt delivered over STDIN (§9.3 — no argv length limits,
 // no prompt in process listings). The real Codex CLI is not available in CI,
 // so these spellings are pinned by the stub-driven suite and MUST be
@@ -475,7 +476,8 @@ function renderPrompt(file, roleArgs, ctx = {}) {
 // human is present) and, per ADR-0007's explicit-config rule, user-config
 // isolation is passed explicitly rather than inherited. The prompt is NOT
 // here: `-` reads it from stdin. Claude-only flags (--allowed-tools,
-// --max-turns, --output-format stream-json) never appear. The stage-9
+// --disallowed-tools, --max-turns, --output-format stream-json) never appear;
+// Codex's own sub-agent denial is `--disable multi_agent` (stage 109). The stage-9
 // generated-denial-document `-c` branch is GONE (stage 11, ADR-0011 — it set a key
 // Codex does not define); `--model` remains omitted-in, so the argv without it
 // is unchanged.
@@ -520,6 +522,15 @@ function buildArgv({ policy, finalMessagePath, cwd, model }) {
   if (policy.codex.ignore_rules) {
     argv.push('--ignore-rules');
   }
+  // Headless roles cannot delegate (stage 109). codex-cli ships `multi_agent`
+  // (spawn_agent/wait_agent) stable and ON by default — observed at the 0.146.0
+  // floor and at 0.154.0 — and in `codex exec` there is no later turn for a
+  // spawned agent to report back into. Denied unconditionally, on every
+  // dispatch, via the documented `--disable <FEATURE>` FLAG: it fails loud
+  // (exit 1 "Unknown feature flag") on a misspelled name, whereas
+  // `-c features.<name>=false` silently absorbs one — the same CDX-002/003 trap
+  // as `-c ignore_user_config` above. The `-c` spelling must never be used here.
+  argv.push('--disable', 'multi_agent');
   if (model) {
     argv.push('--model', model);
   }

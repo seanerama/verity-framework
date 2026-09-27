@@ -204,3 +204,20 @@ test('init is idempotent — second run skips existing files', () => {
   assert(r2.skipped.includes('.gitignore'), 'an existing .gitignore is skipped');
   assert(r2.skipped.includes('.github/workflows/ci.yml'), 'an existing ci.yml is skipped');
 });
+
+// Stage 108 (ADR-0036): the usage ledger is runtime state, ignored from birth.
+test('gitignore.tmpl ignores .verity/usage.csv exactly once, with a comment citing ADR-0036', () => {
+  const tmpl = fs.readFileSync(
+    path.join(__dirname, '..', 'verity', 'templates', 'gitignore.tmpl'),
+    'utf8',
+  );
+  const lines = tmpl.split('\n');
+  assertEqual(lines.filter((l) => l === '.verity/usage.csv').length, 1, 'the line, once');
+  const at = lines.indexOf('.verity/usage.csv');
+  assert(lines[at - 1].startsWith('#') && lines[at - 1].includes('ADR-0036'), 'comment above it');
+  const d = fresh();
+  identity.lock(d, { name: 'Demo', slug: 'demo', owner: 'acme' });
+  scaffold.init(d, {});
+  const emitted = fs.readFileSync(path.join(d, '.gitignore'), 'utf8').split('\n');
+  assertEqual(emitted.filter((l) => l === '.verity/usage.csv').length, 1, 'scaffold emits it once');
+});
