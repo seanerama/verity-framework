@@ -24,6 +24,7 @@ const os = require('node:os');
 const path = require('node:path');
 const scanner = require('../verity/bin/lib/scanner.cjs');
 const stage = require('../verity/bin/lib/stage.cjs');
+const usage = require('../verity/bin/lib/usage.cjs');
 const worker = require('../verity/worker/index.cjs');
 
 const WORKER = path.join(__dirname, '..', 'verity', 'worker', 'index.cjs');
@@ -319,7 +320,7 @@ const labelsOf = (state, n) =>
 // timestamp,run_id,repo,roles,tokens_in,tokens_out,est_usd,wall_secs,outcome,tool_calls,role,gate
 const usageCells = (fx) =>
   fs
-    .readFileSync(path.join(fx.dir, '.verity', 'usage.csv'), 'utf8')
+    .readFileSync(usage.ledgerPath(fx.dir), 'utf8')
     .trim()
     .split('\n')
     .slice(1)

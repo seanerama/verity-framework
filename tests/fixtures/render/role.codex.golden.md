@@ -23,11 +23,14 @@ resource, and the roles after you inherit whatever you burn.
 - **Read narrowly.** Targeted greps and line-ranged reads over whole files;
   never re-read what is already in context.
 
-In headless runs the Task tool may be denied by the role's `.tools.json`
-allowlist. That is expected and correct — each headless role already runs as
-its own isolated process, so there is nothing to isolate. Interactively the
-tool IS available: a full-file rewrite or a multi-file build done inline in
-this conversation is a defect, not a style choice.
+In headless runs (`verity agent-exec`, every worker dispatch) sub-agents are
+denied by the dispatch itself: the headless argv removes them on every run
+(a fixed tool deny list on Claude, `--disable multi_agent` on Codex), whatever
+the role's allowlist says. That is expected and correct — each headless role
+already runs as its own isolated process, so there is nothing to isolate; do
+the work yourself, in that turn. Interactively the tool IS available: a
+full-file rewrite or a multi-file build done inline in this conversation is a
+defect, not a style choice.
 </context-discipline>
 
 <objective>

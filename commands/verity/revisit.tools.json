@@ -2,7 +2,6 @@
   "Read",
   "Grep",
   "Glob",
-  "Task",
   "Write(docs/revisit/**)",
   "Edit(docs/revisit/**)",
   "Bash(verity identity get:*)",

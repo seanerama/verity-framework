@@ -956,18 +956,46 @@ function resumeParkedResult(ctx, { agentCfg, pointer }) {
 // final run summary ({ runId, repo, outcome, roles, invocations, tokens:{in,out},
 // est_usd, wall_secs, ... }): §3.4 usage.csv append — since stage 3 one row PER
 // ROLE INVOCATION (summary.invocations, all sharing the run_id; a zero-role run
-// still writes its single run-level row) — + one `chore(verity): usage <run-id>`
-// commit when policy `commit_usage` is true. Best-effort like the summary
-// comment itself — ledger/commit failures are logged and NEVER change the
-// run's outcome (the §8.1 lock release is the invariant, not bookkeeping).
-function recordUsage(ctx, policy, summary) {
+// still writes its single run-level row). Since stage 108 (ADR-0036) the row
+// goes to the git-dir sidecar (usage.ledgerPath) and NOTHING is committed —
+// the ledger is runtime state; policy `commit_usage` is ignored (loadPolicy
+// warns when it is true). Best-effort like the summary comment itself —
+// ledger failures are logged and NEVER change the run's outcome (the §8.1
+// lock release is the invariant, not bookkeeping).
+function recordUsage(ctx, _policy, summary) {
   try {
-    const rec = usage.record(ctx.cwd, summary, { commit: policy.commit_usage !== false });
-    if (rec.commitError !== null) {
-      ctx.stderr(`verity-worker: warn: usage.csv commit failed: ${oneLine(rec.commitError)}`);
-    }
+    usage.record(ctx.cwd, summary);
   } catch (err) {
     ctx.stderr(`verity-worker: warn: failed to record usage: ${oneLine(err.message)}`);
+  }
+}
+
+// Stage 108 (ADR-0036 amended) — run start, BEFORE the daily-limit check (so
+// the breakers read every row a pre-108 repo left behind): usage.seedLedger
+// seeds the git-dir sidecar ONCE, when it does not exist yet, from the legacy
+// in-tree ledger + every historical `chore(verity): usage` commit (git reads
+// only), and reports whether the tree still tracks `.verity/usage.csv` — one
+// warning naming the operator verb. Never a commit, a checkout, or a write
+// under the working tree (untracking is `verity usage untrack`, an ordinary
+// reviewed change — never the worker's). Never throws: a failed seed is a
+// warning, never a refused run.
+function prepareLedger(ctx) {
+  let res;
+  try {
+    res = usage.seedLedger(ctx.cwd);
+  } catch (err) {
+    ctx.stderr(`verity-worker: warn: could not seed the usage ledger: ${oneLine(err.message)}`);
+    return;
+  }
+  if (res.seeded > 0) {
+    ctx.stderr(
+      `verity-worker: note: seeded ledger: ${res.seeded} rows (${res.path}; stage 108, ADR-0036)`,
+    );
+  }
+  if (res.tracked) {
+    ctx.stderr(
+      `verity-worker: warn: .verity/usage.csv is still tracked by git — it is stale history (the live ledger is ${res.path}); run \`verity usage untrack\` and merge the change it makes (stage 108, ADR-0036)`,
+    );
   }
 }
 
@@ -2092,7 +2120,9 @@ function runOnce(ctx) {
   }
   let policy;
   try {
-    policy = autonomy.loadPolicy(ctx.cwd);
+    policy = autonomy.loadPolicy(ctx.cwd, {
+      warn: (msg) => ctx.stderr(`verity-worker: warn: ${msg}`),
+    });
   } catch (err) {
     // Startup checks fail fast with exit 30 (§4.1) — even though `verity
     // autonomy validate` itself exits 20 for the same problem.
@@ -2138,6 +2168,7 @@ function runOnce(ctx) {
   // ADR-0011: unattended codex autonomy is refused below tier 2 — before any
   // gh call, scan, label, or lock, exactly like the bad-policy refusal above.
   assertContainmentTier(policy, resolveEffectiveAgent(policy));
+  prepareLedger(ctx); // stage 108: seed the git-dir ledger once, before the daily-limit check reads it
   const checks = startupChecks(ctx, policy); // the rest of §4.1: daily limits, auth, identity, breaker
   if (!checks.ok) {
     throw new WorkerError(checks.message, checks.slug);

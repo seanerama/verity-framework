@@ -7,9 +7,10 @@
 // release where the feature was actually observed working.** Every row is
 // either VERIFIED — traceable to a command that really ran against a real
 // Codex CLI — or UNVERIFIED, and an unverified row NEVER contributes to the
-// pin. The single source of real-CLI evidence today is
+// pin. The original source of real-CLI evidence is
 // docs/dev/codex-enforcement-spike-0.146.0.md, which ran against codex-cli
-// 0.146.0 and ONLY that release.
+// 0.146.0 and ONLY that release; stage 109 added a second verified observation
+// (NO_DELEGATION_DOC, `--disable multi_agent`), also made at 0.146.0.
 //
 // Stage 15 added a third status, INCOMPATIBLE: a feature a real CLI or API
 // REJECTED, which the driver therefore does not emit. It is the mirror of the
@@ -35,8 +36,8 @@
 // the feature motivating the minimum) and so does the codex driver, so it must
 // require nothing from either.
 
-// The one real-CLI evidence artifact. Every `evidence` string below points into
-// it; a row citing anything else does not exist yet.
+// The first real-CLI evidence artifact. Every verified row before stage 109
+// points into it; see VERIFIED_EVIDENCE_DOCS below for the full set.
 const SPIKE_DOC = 'docs/dev/codex-enforcement-spike-0.146.0.md';
 const SPIKE_VERSION = '0.146.0';
 
@@ -47,6 +48,19 @@ const SPIKE_VERSION = '0.146.0';
 // observation too, and it needs evidence exactly like a claim that it does.
 const UNBREAK_DOC = 'feature-assessments/codex-headless-unbreak-assessment.md';
 
+// The THIRD real-CLI evidence artifact (stage 109, 2026-09-25): the PR #285
+// review decision, whose probe table (in the stage-109 spec amendment it points
+// to) ran `codex exec --help`, `codex features list --disable multi_agent` and
+// the unknown-name negatives against 0.146.0 (via `npx @openai/codex@0.146.0`)
+// AND the installed 0.154.0 — no model session. A verified row may cite this
+// OR SPIKE_DOC; both are observations made on the real binary.
+const NO_DELEGATION_DOC = 'feature-assessments/headless-no-delegation-assessment.md';
+const NO_DELEGATION_PROBES =
+  'stage-instructions/stage-109-headless-roles-cannot-delegate-deny-the-sub-agent-and-schedulin.md (Amendment — 2026-09-25, probe table)';
+
+// Every artifact a VERIFIED row may cite. Anything else is not evidence yet.
+const VERIFIED_EVIDENCE_DOCS = Object.freeze([SPIKE_DOC, NO_DELEGATION_DOC]);
+
 // Why `firstSupported` is null on every row, said once and referenced by each.
 const NO_BISECT =
   'unknown — the spike ran against 0.146.0 only and did not bisect earlier releases';
@@ -55,7 +69,7 @@ const NO_BISECT =
 // it deliberately does NOT use because a real CLI proved it unusable:
 //   feature        the flag/behavior, spelled as the driver emits it
 //   neededFor      what breaks without it (why it is required, not nice-to-have)
-//   status         'verified'     — an observation in SPIKE_DOC; sets the pin
+//   status         'verified'     — an observation in VERIFIED_EVIDENCE_DOCS; sets the pin
 //                  'unverified'   — the driver emits it, nobody watched it
 //                  'incompatible' — a real CLI/API REJECTED it (UNBREAK_DOC);
 //                                   the driver no longer emits it, and the row
@@ -116,6 +130,15 @@ const CODEX_FEATURES = [
     verifiedAt: SPIKE_VERSION,
     firstSupported: null,
     evidence: `${SPIKE_DOC} header — the observed output form carries a \`codex-cli \` prefix`,
+  },
+  {
+    feature: 'codex exec --disable multi_agent',
+    neededFor:
+      'a headless role must not hand its work to a sub-agent (stage 109) — multi_agent (spawn_agent/wait_agent) is stable and ON by default, and `codex exec` has no later turn for a spawned agent to report into',
+    status: 'verified',
+    verifiedAt: SPIKE_VERSION,
+    firstSupported: null,
+    evidence: `${NO_DELEGATION_DOC} (probe table: ${NO_DELEGATION_PROBES}), 2026-09-25 — at 0.146.0 (npx @openai/codex@0.146.0) and the installed 0.154.0: \`exec --help\` lists \`--disable <FEATURE>\`; \`--disable multi_agent\` → \`multi_agent … false\`, exit 0; \`--disable totally_bogus\` → exit 1 "Unknown feature flag" (the flag fails loud, unlike \`-c features.*\`, which silently absorbs an unknown key)`,
   },
   // --- required, but NOT verified by anything we have run ------------------------
   // These rows are why the matrix exists rather than a single number: the driver
@@ -209,15 +232,20 @@ function pinMotivation(rows = CODEX_FEATURES) {
   if (floor === null) {
     return `no Codex feature is verified against a real CLI — see ${SPIKE_DOC}`;
   }
-  return `required feature(s) VERIFIED only at ${floor}: ${motivatingFeatures(rows).join(', ')} (evidence: ${SPIKE_DOC})`;
+  const docs = VERIFIED_EVIDENCE_DOCS.filter((doc) =>
+    verifiedRows(rows).some((r) => r.verifiedAt === floor && r.evidence.includes(doc)),
+  );
+  return `required feature(s) VERIFIED only at ${floor}: ${motivatingFeatures(rows).join(', ')} (evidence: ${(docs.length > 0 ? docs : [SPIKE_DOC]).join(', ')})`;
 }
 
 module.exports = {
   CODEX_FEATURES,
   NO_BISECT,
+  NO_DELEGATION_DOC,
   SPIKE_DOC,
   SPIKE_VERSION,
   UNBREAK_DOC,
+  VERIFIED_EVIDENCE_DOCS,
   incompatibleRows,
   motivatingFeatures,
   pinMotivation,

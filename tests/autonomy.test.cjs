@@ -83,7 +83,7 @@ notify:
 
 humans: []                       # logins; bot token matching any → refuse to start
 
-commit_usage: true               # §3.4: commit usage.csv after each run (T11)
+commit_usage: false              # ignored since stage 108 (ADR-0036): the ledger is runtime state
 
 agent:                           # stage 9 — worker runtime selection (ADR-0009)
   provider: claude               # claude | codex

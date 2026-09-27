@@ -138,7 +138,7 @@ show exactly what you'll run.
    re-run; do it unless they already have them.
 
 2. **Policy file** — write `.verity/autonomy.yml` for the non-trust fields (mode, limits,
-   humans, notify.mention, commit_usage, and — Codex only — the `agent` block and
+   humans, notify.mention, and — Codex only — the `agent` block and
    `limits.unknown_cost_behavior`), then **raise trust through the CLI so the ADR is
    recorded**:
    ```bash

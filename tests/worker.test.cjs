@@ -5,11 +5,12 @@
 // scripted stub via VERITY_AGENT_BIN (canned stream-json per invocation, may
 // append issues/PRs to the gh state to simulate role side effects), $HOME is
 // redirected. No network, no live API, ever.
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const stage = require('../verity/bin/lib/stage.cjs');
+const usage108 = require('../verity/bin/lib/usage.cjs');
 const worker = require('../verity/worker/index.cjs');
 
 const WORKER = path.join(__dirname, '..', 'verity', 'worker', 'index.cjs');
@@ -236,6 +237,9 @@ for (const w of step.writes || []) {
   fs.writeFileSync(target, w.text);
 }
 fs.writeFileSync(path.join(logDir, 'liveness.marker'), 'ran\\n');
+// Stage 108: a CRASH mid-loop — SIGKILL the worker (this stub's parent: the
+// worker runs agent-exec in-process), so no summarize/finally can run.
+if (step.killWorker) { process.kill(process.ppid, 'SIGKILL'); process.exit(0); }
 if (step.raw !== undefined) { process.stdout.write(step.raw); process.exit(0); }
 const lines = [
   { type: 'thread.started', thread_id: 't' },
@@ -361,11 +365,21 @@ function runWorker(fx, extra = {}) {
     ...(extra.env || {}),
   };
   const args = extra.args || ['--repo', 'octo/fixture', '--once'];
+  if (extra.captureStderr) {
+    // Stage 108: stderr captured on success too (the run-start notes/warnings).
+    const r = spawnSync('node', [WORKER, ...args], { cwd: fx.dir, encoding: 'utf8', env });
+    return { code: r.status, signal: r.signal, out: r.stdout || '', stderr: r.stderr || '' };
+  }
   try {
     const out = execFileSync('node', [WORKER, ...args], { cwd: fx.dir, encoding: 'utf8', env });
     return { code: 0, out, stderr: '' };
   } catch (err) {
-    return { code: err.status, out: err.stdout || '', stderr: err.stderr || '' };
+    return {
+      code: err.status,
+      signal: err.signal,
+      out: err.stdout || '',
+      stderr: err.stderr || '',
+    };
   }
 }
 
@@ -1123,8 +1137,10 @@ const USAGE_HEADER =
 const LEGACY_USAGE_HEADER =
   'timestamp,run_id,repo,roles,tokens_in,tokens_out,est_usd,wall_secs,outcome';
 
+// Stage 108 (ADR-0036): the ledger every reader resolves — the git-dir
+// sidecar in a git fixture, `.verity/usage.csv` otherwise.
 function readUsageCsv(fx) {
-  const file = path.join(fx.dir, '.verity', 'usage.csv');
+  const file = usage108.ledgerPath(fx.dir);
   return fs.existsSync(file)
     ? fs
         .readFileSync(file, 'utf8')
@@ -1230,9 +1246,10 @@ test('e2e: a run over N roles appends N usage.csv rows sharing ONE run_id (stage
   }
 });
 
-test('e2e: usage commit failure (fixture is not a git repo) NEVER fails the run', () => {
-  // commit_usage defaults to true and /tmp fixtures are not git repos, so every
-  // worker e2e run above already exercises a failing commit; this pins it down.
+test('e2e: a non-git fixture (no ledger commit, no migration possible) NEVER fails the run', () => {
+  // Pre-stage-108 this pinned a FAILING ledger commit (/tmp fixtures are not
+  // git repos). Since ADR-0036 nothing is committed; the run-start migration
+  // outside a repository is a silent no-op, and the run is unchanged.
   const fx = fixture({
     issues: [stageIssue({ labels: ['verity:ready', 'verity:awaiting-approval'] })],
     stages: [{ title: 'Core' }],
@@ -3249,4 +3266,166 @@ test('stage 37: the PRE-dispatch plan-gate does NOT fall back to a stale prior-i
   } finally {
     gh.restore();
   }
+});
+
+// --- stage 108 (ADR-0036 amended): the ledger lives in the git dir -------------------
+//
+// The worker never commits for the ledger and never untracks it: rows go to
+// `<git-dir>/verity/usage.csv` (usage.ledgerPath), which no checkout can
+// reach. At run start — before the daily-limit check — it seeds that sidecar
+// once from the legacy in-tree file + every historical `chore(verity): usage`
+// commit (git reads only), and warns once while the tree still tracks
+// `.verity/usage.csv`.
+
+function fxGit(fx, args) {
+  return execFileSync('git', ['-C', fx.dir, ...args], { encoding: 'utf8', stdio: 'pipe' });
+}
+
+function fxRefs(fx) {
+  return fxGit(fx, ['for-each-ref', '--format=%(refname) %(objectname)']);
+}
+
+function fxUsageCommits(fx) {
+  return fxGit(fx, ['log', '--all', '--format=%s', '--grep=chore(verity): usage'])
+    .split('\n')
+    .filter((l) => l !== '');
+}
+
+const TRACKED_WARNING = 'is still tracked by git';
+const countLines = (text, needle) => text.split('\n').filter((l) => l.includes(needle)).length;
+
+// A pre-108 repository: the default branch TRACKS a ledger holding `treeRow`,
+// an orphaned branch holds a usage commit with `historyRow` too, and a real
+// bare origin tracks the ledger with refs/remotes/origin/HEAD SET — the base
+// stage branches really fork from (PR #282 F5).
+function trackLedgerWithOrigin(fx, treeRow, historyRow) {
+  seedUsageCsv(fx, [treeRow]);
+  fxGit(fx, ['add', '--', '.verity/usage.csv']);
+  fxGit(fx, ['commit', '-q', '-m', 'chore(verity): usage run-prev']);
+  const branch = fxGit(fx, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+  fxGit(fx, ['checkout', '-q', '-b', 'feat/stage-0-old']);
+  fs.appendFileSync(path.join(fx.dir, '.verity', 'usage.csv'), `${historyRow}\n`);
+  fxGit(fx, ['commit', '-q', '-am', 'chore(verity): usage run-old']);
+  fxGit(fx, ['checkout', '-q', branch]);
+  fxGit(fx, ['push', '-q', 'origin', branch]);
+  fxGit(fx, ['fetch', '-q', 'origin']);
+  fxGit(fx, ['remote', 'set-head', 'origin', branch]);
+  return branch;
+}
+
+const todayRow = (runId) =>
+  `${new Date().toISOString()},${runId},octo/fixture,plan,1,1,0.01,1,success`;
+
+test('stage 108: a worker run on a repo whose origin still TRACKS the ledger moves NO ref, seeds once, warns once', () => {
+  const fx = fixture({
+    git: true,
+    issues: [
+      stageIssue({ labels: ['verity:ready', 'verity:awaiting-approval', 'verity:approved'] }),
+    ],
+    stages: [{ title: 'Core' }],
+    policy: `${POLICY_SUPERVISED}limits:\n  max_chained_roles: 1\n`,
+    queue: [{ final: marker('success') }, { final: marker('success') }],
+  });
+  const PREV = todayRow('run-prev');
+  const OLD = todayRow('run-old');
+  trackLedgerWithOrigin(fx, PREV, OLD);
+  const treeFile = path.join(fx.dir, '.verity', 'usage.csv');
+  const treeBefore = fs.readFileSync(treeFile);
+  const refsBefore = fxRefs(fx);
+  assert(refsBefore.includes('refs/remotes/origin/HEAD'), 'precondition: origin/HEAD is set');
+
+  const first = runWorker(fx, { captureStderr: true });
+  assertEqual(first.code, 0, `run proceeds (stderr: ${first.stderr})`);
+  assertEqual(fxRefs(fx), refsBefore, 'git for-each-ref identical — no commit on any ref');
+  assertEqual(fxUsageCommits(fx).length, 2, 'only the two pre-108 usage commits');
+  assertEqual(countLines(first.stderr, 'seeded ledger: 2 rows'), 1, first.stderr);
+  assertEqual(countLines(first.stderr, TRACKED_WARNING), 1, 'one untrack warning');
+  assert(first.stderr.includes('`verity usage untrack`'), 'the warning names the verb');
+  const lines = readUsageCsv(fx);
+  assert(lines.includes(PREV) && lines.includes(OLD), 'tree row + history row seeded');
+  assert(lines.length > 3, 'and the run recorded its own row(s) after them');
+  assert(fs.readFileSync(treeFile).equals(treeBefore), 'the tracked tree file is untouched');
+  assertEqual(fxGit(fx, ['status', '--porcelain']).trim(), '', 'nothing written in the tree');
+  assert(
+    usage108.ledgerPath(fx.dir).startsWith(path.join(fx.dir, '.git')),
+    'the ledger is the git-dir sidecar',
+  );
+
+  const rowsAfterFirst = readUsageCsv(fx).length;
+  const second = runWorker(fx, { captureStderr: true });
+  assertEqual(fxRefs(fx), refsBefore, 'still no ref moved');
+  assertEqual(countLines(second.stderr, 'seeded ledger'), 0, 'the second run seeds nothing');
+  assertEqual(countLines(second.stderr, TRACKED_WARNING), 1, 'the warning repeats once per run');
+  assert(readUsageCsv(fx).length >= rowsAfterFirst, 'no row lost between runs');
+});
+
+test('stage 108: crash immunity — a run SIGKILLed after the stage checkout leaves every row visible to the next run’s daily breaker', () => {
+  const fx = fixture({
+    git: true, // build holds git_write → Verity cuts the stage branch (ADR-0012)
+    issues: [REQUEST_ISSUE],
+    stages: [{ title: 'Core' }],
+    policy: `${POLICY_CODEX}limits:\n  unknown_cost_behavior: allow_with_token_limit\nnotify:\n  mention: [seanerama]\n`,
+    queue: [
+      {
+        final: marker('success', { artifacts: { issues: [31] } }),
+        addIssues: [
+          { number: 31, title: '[stage 1] Core', state: 'OPEN', labels: [], assignees: [] },
+        ],
+      },
+      { killWorker: true }, // build: dies AFTER Verity switched the checkout
+    ],
+  });
+  const PREV = todayRow('run-prev');
+  const OLD = todayRow('run-old');
+  const startRef = trackLedgerWithOrigin(fx, PREV, OLD);
+
+  const crashed = runWorker(fx, { env: codexEnv(fx), captureStderr: true });
+  assertEqual(crashed.signal, 'SIGKILL', `the worker was killed mid-loop (${crashed.stderr})`);
+  const head = fxGit(fx, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+  assert(head !== startRef && head.startsWith('feat/stage-1'), `left on the stage branch: ${head}`);
+  assert(
+    !fs.readFileSync(path.join(fx.dir, '.verity', 'usage.csv'), 'utf8').includes('run-old'),
+    'precondition: the checked-out tree copy lacks the history row',
+  );
+  assertEqual(fxUsageCommits(fx).length, 2, 'the worker made no usage commit');
+
+  // Next run, still on the abandoned stage branch: the breaker must count both
+  // seeded runs even though no summarize/restore ever ran.
+  fs.writeFileSync(
+    path.join(fx.dir, '.verity', 'autonomy.yml'),
+    `${POLICY_CODEX}limits:\n  unknown_cost_behavior: allow_with_token_limit\n  max_runs_per_day: 2\nnotify:\n  mention: [seanerama]\n`,
+  );
+  const next = runWorker(fx, { env: codexEnv(fx), captureStderr: true });
+  assertEqual(next.code, 30, `refused at startup (stderr: ${next.stderr})`);
+  assert(
+    next.stderr.includes('daily run cap reached: 2 runs today'),
+    `the breaker saw both rows: ${next.stderr}`,
+  );
+  assertEqual(countLines(next.stderr, 'seeded ledger'), 0, 'nothing re-seeded');
+});
+
+test('stage 108: a worker run on a scaffolded repo (ledger ignored at birth) makes NO chore(verity): usage commit', () => {
+  const fx = fixture({
+    git: true,
+    issues: [
+      stageIssue({ labels: ['verity:ready', 'verity:awaiting-approval', 'verity:approved'] }),
+    ],
+    stages: [{ title: 'Core' }],
+    policy: `${POLICY_SUPERVISED}limits:\n  max_chained_roles: 1\n`,
+    queue: [{ final: marker('success') }],
+  });
+  // The post-108 scaffold: the template's ignore line.
+  usage108.ensureIgnoreLine(path.join(fx.dir, '.gitignore'));
+  fxGit(fx, ['commit', '-q', '-am', 'scaffold .gitignore (stage 108 template)']);
+  const refsBefore = fxRefs(fx);
+  const { code, stderr } = runWorker(fx, { captureStderr: true });
+  assertEqual(code, 0, `run proceeds (stderr: ${stderr})`);
+  assertEqual(fxUsageCommits(fx).length, 0, 'git log --all --grep="chore(verity): usage" is empty');
+  assertEqual(fxRefs(fx), refsBefore, 'no ref moved');
+  assertEqual(countLines(stderr, TRACKED_WARNING), 0, 'nothing tracked — no warning');
+  assertEqual(countLines(stderr, 'seeded ledger'), 0, 'nothing to seed');
+  const lines = readUsageCsv(fx);
+  assert(lines !== null && lines.length >= 2, 'the run still recorded its rows');
+  assert(!fs.existsSync(path.join(fx.dir, '.verity', 'usage.csv')), 'nothing in the tree');
+  assertEqual(fxGit(fx, ['status', '--porcelain']).trim(), '', 'the tree stays clean');
 });

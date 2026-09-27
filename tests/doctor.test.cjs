@@ -1035,3 +1035,38 @@ test('doctor stage 88: VERITY_SSH_BIN picks the probed ssh (the stage-87 overrid
   assertEqual(byName.ssh.ok, true);
   assert(byName.ssh.detail.includes(sshBin), 'the detail names the overridden binary');
 });
+
+// --- stage 108 (ADR-0036): a TRACKED usage ledger is a doctor warning ------------
+//
+// Real git (the process PATH, not the stub bin dir): the check reads the
+// cwd's repository. deps: [] isolates the ledger rows from the binary probes.
+
+function ledgerRepo(tracked) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-doctor-ledger-'));
+  const git = (args) => spawnSync('git', ['-C', dir, ...args], { stdio: 'pipe' });
+  git(['init', '-q']);
+  fs.mkdirSync(path.join(dir, '.verity'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.verity', 'usage.csv'), 'timestamp,run_id\n');
+  fs.writeFileSync(path.join(dir, 'README.md'), 'x\n');
+  git(['add', tracked ? '-A' : 'README.md']);
+  git(['-c', 'user.name=t', '-c', 'user.email=t@example.test', 'commit', '-q', '-m', 'base']);
+  return dir;
+}
+
+test('doctor stage 108: a tracked .verity/usage.csv adds ONE warning row naming the verb', () => {
+  const rows = doctor.runChecks({ agent: 'claude', deps: [], cwd: ledgerRepo(true) });
+  const ledger = rows.filter((r) => r.name === 'usage-ledger');
+  assertEqual(ledger.length, 1, 'one warning row');
+  assertEqual(ledger[0].ok, true, 'a warning, not a failure — the worker migrates it itself');
+  assert(ledger[0].detail.startsWith('warning:'), ledger[0].detail);
+  assert(ledger[0].detail.includes('verity usage untrack'), 'names the verb');
+  assertEqual(doctor.exitCodeFor(rows), 0, 'doctor stays green');
+});
+
+test('doctor stage 108: an untracked ledger, a non-repo, or no cwd adds NO row', () => {
+  for (const cwd of [ledgerRepo(false), fs.mkdtempSync(path.join(os.tmpdir(), 'vd-norepo-'))]) {
+    const rows = doctor.runChecks({ agent: 'claude', deps: [], cwd });
+    assertEqual(rows.filter((r) => r.name === 'usage-ledger').length, 0, cwd);
+  }
+  assertEqual(doctor.ledgerChecks({}).length, 0, 'no cwd supplied → zero rows (byte-identical)');
+});

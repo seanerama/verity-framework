@@ -113,7 +113,9 @@ test('revisit role: .tools.json scopes every write to docs/revisit/ and borrows 
     );
   }
   assert(scopedWrites > 0, 'the report write IS allowlisted (scoped)');
-  assert(tools.includes('Task'), 'sweeps are delegated — Task is allowlisted');
+  // Stage 109: headless dispatches deny sub-agents outright (--disallowed-tools),
+  // so the allowlist must not claim Task — the loader refuses a denied entry.
+  assert(!tools.includes('Task'), 'Task is not allowlisted (denied on every headless dispatch)');
   assert(tools.includes('Bash(verity identity get:*)'), 'the mode probe is allowlisted');
 });
 

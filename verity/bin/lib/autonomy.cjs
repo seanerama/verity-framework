@@ -88,10 +88,11 @@ const DEFAULTS = {
   },
   notify: { mention: [], webhook: null },
   humans: [],
-  // §3.4: worker commits .verity/usage.csv (`chore(verity): usage <run-id>`)
-  // after each run. Not in the §2 schema listing but required by §3.4's
-  // "repo policy commit_usage: true (default true)" — noted T11 deviation.
-  commit_usage: true,
+  // §3.4 (T11) had the worker commit .verity/usage.csv after each run. Since
+  // stage 108 (ADR-0036) the ledger is runtime state and is NEVER committed:
+  // the key stays a valid boolean so old policies load unchanged, defaults to
+  // false, and is ignored — loadPolicy warns once when a file sets it true.
+  commit_usage: false,
   // Stage 9 (ADR-0005/0007/0009, codex-support.md §11.1): which model runtime
   // the worker drives. Defaults keep every pre-existing policy Claude-backed;
   // codex autonomy requires an explicit `provider: codex` edit (dark launch).
@@ -916,15 +917,31 @@ function readUserPolicy(cwd) {
   return { exists: true, path: file, data: parseYaml(fs.readFileSync(file, 'utf8')) };
 }
 
+// Stage 108 (ADR-0036): non-fatal notes about a VALID policy. Never errors —
+// a policy that loaded before must keep loading; a dead key only earns a line.
+const COMMIT_USAGE_IGNORED_WARNING =
+  'commit_usage is ignored since stage 108 (ADR-0036): the ledger is runtime state';
+
+function policyWarnings(policy) {
+  return policy && policy.commit_usage === true ? [COMMIT_USAGE_IGNORED_WARNING] : [];
+}
+
 // EFFECTIVE policy: defaults ⊕ file, validated, invariants enforced.
 // Throws PolicyError (exitCode 20) on malformed YAML or schema violations.
-// This is the single entry point for T08/T10/T12/T13.
-function loadPolicy(cwd) {
+// This is the single entry point for T08/T10/T12/T13. `opts.warn(message)`
+// receives each policyWarnings() line once (stage 108); the returned policy
+// object is unaffected by it.
+function loadPolicy(cwd, opts = {}) {
   const user = readUserPolicy(cwd);
   const merged = deepMerge(clone(DEFAULTS), user.data);
   const errors = validatePolicy(merged);
   if (errors.length > 0) {
     throw new PolicyError(`invalid autonomy policy (${user.path}): ${errors.join('; ')}`);
+  }
+  if (typeof opts.warn === 'function') {
+    for (const w of policyWarnings(merged)) {
+      opts.warn(w);
+    }
   }
   const policy = enforceInvariants(merged);
   // Stage 79 (ADR-0029): resolve the delivery substrate ONCE, here at load —
@@ -1194,20 +1211,39 @@ function validateFile(cwd) {
   if (errors.length > 0) {
     throw new PolicyError(`invalid autonomy policy (${user.path}): ${errors.join('; ')}`);
   }
-  return { valid: true, path: user.path, exists: user.exists, raw: 'valid' };
+  const result = { valid: true, path: user.path, exists: user.exists, raw: 'valid' };
+  // Stage 108: a valid policy with a dead key is still valid (exit 0); the
+  // note rides on the result only when there is one, so every other policy's
+  // result is byte-identical.
+  const warnings = policyWarnings(merged);
+  if (warnings.length > 0) {
+    result.warnings = warnings;
+  }
+  return result;
+}
+
+// Stage 108: warnings go to stderr so `show --json` / `validate --json` stdout
+// stays exactly one object.
+function warnToStderr(message) {
+  process.stderr.write(`verity autonomy: warn: ${message}\n`);
 }
 
 function dispatch(args, flags) {
   const cwd = flags.cwd || process.cwd();
   const verb = args[0];
   if (verb === 'show') {
-    return loadPolicy(cwd); // the EFFECTIVE policy object, nothing else (pipe-safe with --json)
+    // the EFFECTIVE policy object, nothing else (pipe-safe with --json)
+    return loadPolicy(cwd, { warn: warnToStderr });
   }
   if (verb === 'set') {
     return setValue(cwd, args[1], args[2], flags);
   }
   if (verb === 'validate') {
-    return validateFile(cwd);
+    const result = validateFile(cwd);
+    for (const w of result.warnings || []) {
+      warnToStderr(w);
+    }
+    return result;
   }
   throw new Error(`unknown autonomy verb: ${verb || '(none)'} — use show|set|validate`);
 }
@@ -1223,7 +1259,9 @@ module.exports = {
   GATE_RUNNER_NAME_RE,
   KNOWN_AGENT_ROLES,
   WORKER_DISABLED_MESSAGE,
+  COMMIT_USAGE_IGNORED_WARNING,
   PolicyError,
+  policyWarnings,
   policyPath,
   parseYaml,
   toYaml,

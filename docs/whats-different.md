@@ -87,7 +87,7 @@ people who know verity-framework and want the delta.
 | Path | What |
 |---|---|
 | `.verity/autonomy.yml` | Policy: mode, trust, gates, limits, humans, notify (schema: `schemas/autonomy.schema.json`) |
-| `.verity/usage.csv` | Append-only run ledger (one row per run; `verity usage` reads it) |
+| `<git-dir>/verity/usage.csv` (`.verity/usage.csv` outside git) | Append-only run ledger, runtime state never committed (one row per role invocation; `verity usage` reads it) |
 | `~/.verity/logs/<run-id>/<role>.jsonl` | Per-role headless transcripts |
 | `commands/verity/<role>.tools.json` | Per-role tool allowlists |
 | `.github/workflows/verity-worker.yml` | The Actions driver (from `verity install --actions`) |

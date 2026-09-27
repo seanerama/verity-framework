@@ -178,7 +178,7 @@ test('readUsage: pre-stage-21 11-column rows carry tool_calls + role; bad tool_c
   assertEqual(rows[0].role, 'build');
 });
 
-test('record: summary.invocations → one row PER ROLE INVOCATION sharing the run_id, ONE commit', () => {
+test('record: summary.invocations → one row PER ROLE INVOCATION sharing the run_id, NO commit (stage 108)', () => {
   const dir = gitRepo();
   const summary = {
     ...SUMMARY,
@@ -214,9 +214,13 @@ test('record: summary.invocations → one row PER ROLE INVOCATION sharing the ru
     now: new Date('2026-06-10T12:00:00.000Z'),
   });
   assertEqual(res.rows, 3, 'three rows appended');
-  assertEqual(res.committed, true, `single commit succeeded (${res.commitError})`);
+  assertEqual(res.committed, undefined, 'record reports no commit — it never makes one');
+  // Stage 108 (ADR-0036 amended): in a git repository the rows land in the
+  // git-dir sidecar — never in the working tree.
+  assertEqual(res.path, path.join(dir, '.git', 'verity', 'usage.csv'));
+  assert(!fs.existsSync(path.join(dir, '.verity', 'usage.csv')), 'nothing written in the tree');
   const lines = fs
-    .readFileSync(path.join(dir, '.verity', 'usage.csv'), 'utf8')
+    .readFileSync(usage.ledgerPath(dir), 'utf8')
     .split('\n')
     .filter((l) => l !== '');
   assertEqual(lines.length, 4, 'header + one row per invocation');
@@ -231,8 +235,13 @@ test('record: summary.invocations → one row PER ROLE INVOCATION sharing the ru
   );
   const { rows } = usage.readUsage(dir);
   assertEqual(new Set(rows.map((r) => r.run_id)).size, 1, 'all rows share the run_id');
-  const commits = git(dir, ['rev-list', '--count', 'HEAD']).trim();
-  assertEqual(commits, '1', 'exactly one commit for the whole run');
+  let hasCommits = true;
+  try {
+    git(dir, ['rev-parse', '--verify', 'HEAD']);
+  } catch {
+    hasCommits = false;
+  }
+  assertEqual(hasCommits, false, 'commit:true is ignored — the repo still has zero commits');
 });
 
 test('record: no invocations → single legacy-shaped run row (zero-role runs still leave a trace)', () => {
@@ -581,54 +590,6 @@ test('backward compat: pre-stage-18 legacy rows parse unchanged and count nothin
   assertEqual(summary.unknown_cost_runs, 0, 'a legacy row with a real cost is not "unknown"');
 });
 
-// --- git commit (policy commit_usage) --------------------------------------------
-
-test('record: commit_usage true → exactly one commit, message + csv-only pathspec', () => {
-  const dir = gitRepo();
-  const res = usage.record(dir, SUMMARY, { commit: true });
-  assertEqual(res.committed, true, `commit succeeded (${res.commitError})`);
-  assertEqual(res.commitError, null);
-  const subject = git(dir, ['log', '-1', '--format=%s']).trim();
-  assertEqual(subject, `chore(verity): usage ${SUMMARY.runId}`, '§3.4 commit message');
-  const files = git(dir, ['show', '--name-only', '--format=', 'HEAD'])
-    .trim()
-    .split('\n')
-    .filter((f) => f !== '');
-  assertEqual(files.join(','), '.verity/usage.csv', 'ONLY the csv is committed');
-});
-
-test('record: commit failure (not a git repo) is reported, never thrown; row still appended', () => {
-  const dir = tmpDir(); // /tmp — not inside any git repo
-  const res = usage.record(dir, SUMMARY, { commit: true });
-  assertEqual(res.committed, false);
-  assert(typeof res.commitError === 'string' && res.commitError.length > 0, 'error captured');
-  assert(fs.existsSync(path.join(dir, '.verity', 'usage.csv')), 'append happened regardless');
-});
-
-test('record: commit:false → no commit attempted, no error', () => {
-  const dir = gitRepo();
-  const res = usage.record(dir, SUMMARY, { commit: false });
-  assertEqual(res.committed, false);
-  assertEqual(res.commitError, null);
-  let hasCommits = true;
-  try {
-    git(dir, ['rev-parse', 'HEAD']);
-  } catch {
-    hasCommits = false;
-  }
-  assertEqual(hasCommits, false, 'repo still has zero commits');
-});
-
-// --- stage 38 (#3): the ledger commit must self-identify in a bare CI runner -----
-//
-// A fresh Actions runner has NO user.name/user.email configured, and the
-// generated verity-worker.yml never sets one. Before stage 38 commitUsage ran
-// `git commit` with no author identity, git bailed with "Author identity
-// unknown", and the priced audit ledger was silently never committed — in
-// exactly the environment autonomy is meant to run in. commitUsage now supplies
-// a stable bot identity (verity-worker <verity-worker@users.noreply.github.com>)
-// via `-c` flags, scoped to the one command. Best-effort semantics unchanged.
-
 // Run fn with NO git identity resolvable: an empty HOME plus /dev/null global
 // and system config, and the GIT_*_NAME/EMAIL env overrides cleared — so the
 // ambient dev identity (this machine's global git config) cannot leak in and
@@ -675,42 +636,593 @@ function bareGitRepo() {
   return dir;
 }
 
-test('stage 38: commitUsage succeeds with NO ambient git identity, authored by the bot', () => {
-  const dir = bareGitRepo();
-  usage.appendUsage(dir, usage.entryFromSummary(SUMMARY));
-  const res = withNoGitIdentity(() => usage.commitUsage(dir, SUMMARY.runId));
-  assertEqual(res.committed, true, `commit succeeds even with no git identity (${res.error})`);
-  const author = withNoGitIdentity(() => git(dir, ['log', '-1', '--format=%an <%ae>']).trim());
+// --- stage 108 (ADR-0036 amended): the ledger is runtime state in the git dir ------
+//
+// Before 108 `record` committed the ledger (`chore(verity): usage <run-id>`) on
+// whatever branch HEAD was on — the stage branch the run built on — and the
+// next tick's fresh stage branch, forked from the squash-merged default
+// branch, did not contain that commit: the working-tree ledger lost the rows
+// (fixture A, 2026-09-25: 9 of 14). Since 108 the ledger is
+// `<git-dir>/verity/usage.csv`, which no checkout can reach. Real throwaway
+// repos, no network.
+
+const ROW_1 = '2026-06-10T01:00:00.000Z,run-1,o/r,plan,100,10,0.5,60,success,4,plan,,,';
+const ROW_2 = '2026-06-10T02:00:00.000Z,run-2,o/r,build,200,20,1,300,success,31,build,,,';
+const ROW_3 = '2026-06-10T03:00:00.000Z,run-3,o/r,review,50,5,,42,gated,7,review,,,';
+
+const treeLedger = (dir) => path.join(dir, '.verity', 'usage.csv');
+const sidecar = (dir) => path.join(dir, '.git', 'verity', 'usage.csv');
+
+// A repo on `main` whose baseline commit TRACKS a one-row ledger — the shape
+// of every pre-108 repo after its first worker run.
+function repoWithTrackedLedger() {
+  const dir = gitRepo();
+  git(dir, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
+  writeCsv(dir, [usage.HEADER, ROW_1]);
+  fs.writeFileSync(path.join(dir, 'README.md'), 'fixture\n');
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-q', '-m', 'baseline with a tracked ledger']);
+  return dir;
+}
+
+// ... plus a bare `origin` that ALSO tracks the ledger, with
+// refs/remotes/origin/HEAD SET — the shape stage branches really fork from
+// (git-lifecycle resolveBase prefers origin/HEAD). PR #282 F5.
+function repoWithOriginTrackingLedger() {
+  const dir = repoWithTrackedLedger();
+  const origin = path.join(tmpDir(), 'origin.git');
+  execFileSync('git', ['init', '-q', '--bare', origin], { stdio: 'pipe' });
+  git(dir, ['remote', 'add', 'origin', origin]);
+  git(dir, ['push', '-q', 'origin', 'main']);
+  git(dir, ['fetch', '-q', 'origin']);
+  git(dir, ['remote', 'set-head', 'origin', 'main']);
   assertEqual(
-    author,
-    'verity-worker <verity-worker@users.noreply.github.com>',
-    'the commit is authored by the stable bot identity, not the ambient config',
+    git(dir, ['symbolic-ref', 'refs/remotes/origin/HEAD']).trim(),
+    'refs/remotes/origin/main',
+    'precondition: origin/HEAD is set',
   );
-  const committer = withNoGitIdentity(() => git(dir, ['log', '-1', '--format=%cn <%ce>']).trim());
+  return dir;
+}
+
+function usageCommits(dir) {
+  return git(dir, ['log', '--all', '--format=%s', '--grep=chore(verity): usage'])
+    .split('\n')
+    .filter((l) => l !== '');
+}
+
+function commitCount(dir) {
+  return git(dir, ['rev-list', '--all', '--count']).trim();
+}
+
+function refs(dir) {
+  return git(dir, ['for-each-ref', '--format=%(refname) %(objectname)']);
+}
+
+// Commit `text` as the in-tree ledger on a new branch off main, then return to
+// main (which may or may not track the file).
+function usageCommitOnBranch(dir, branch, text, subject) {
+  git(dir, ['checkout', '-q', '-b', branch, 'main']);
+  fs.mkdirSync(path.join(dir, '.verity'), { recursive: true });
+  fs.writeFileSync(treeLedger(dir), text);
+  git(dir, ['add', '--', '.verity/usage.csv']);
+  git(dir, ['commit', '-q', '-m', subject]);
+  git(dir, ['checkout', '-q', 'main']);
+}
+
+test('regression (stage 108, F5): a recorded row survives `checkout -b feat/b origin/main` with origin/HEAD set', () => {
+  const dir = repoWithOriginTrackingLedger();
+  git(dir, ['checkout', '-q', '-b', 'feat/a']);
+  // Exactly the call the pre-108 worker made under the default policy.
+  usage.record(dir, SUMMARY, { commit: true });
+  git(dir, ['checkout', '-q', '-b', 'feat/b', 'origin/main']);
+  const { rows } = usage.readUsage(dir);
+  assert(
+    rows.some((r) => r.run_id === SUMMARY.runId),
+    'the row recorded on feat/a is still in the ledger on feat/b',
+  );
+  assertEqual(usageCommits(dir).length, 0, 'no chore(verity): usage commit was made');
   assertEqual(
-    committer,
-    'verity-worker <verity-worker@users.noreply.github.com>',
-    'a single -c pair covers author AND committer',
+    fs.readFileSync(treeLedger(dir), 'utf8'),
+    `${usage.HEADER}\n${ROW_1}\n`,
+    'the tracked in-tree file is untouched history',
   );
-  const subject = withNoGitIdentity(() => git(dir, ['log', '-1', '--format=%s']).trim());
-  assertEqual(subject, `chore(verity): usage ${SUMMARY.runId}`, '§3.4 commit message unchanged');
 });
 
-test('stage 38: best-effort preserved — a non-repo cwd still returns committed:false, never throws', () => {
-  const dir = tmpDir(); // /tmp — not inside any git repo
-  const res = withNoGitIdentity(() => usage.commitUsage(dir, 'run-x'));
-  assertEqual(res.committed, false, 'a genuinely broken git setup still reports false');
-  assert(typeof res.error === 'string' && res.error.length > 0, 'error captured, run continues');
+test('clobber immunity (stage 108): checkouts to and from branches that TRACK the ledger never change the rows', () => {
+  const dir = repoWithTrackedLedger();
+  usageCommitOnBranch(
+    dir,
+    'feat/t',
+    `${usage.HEADER}\n${ROW_2}\n`,
+    'a branch with its own tracked copy',
+  );
+  usage.record(dir, SUMMARY, { now: new Date('2026-06-10T12:00:00.000Z') });
+  const before = fs.readFileSync(usage.ledgerPath(dir), 'utf8');
+  for (const target of ['feat/t', 'main', 'feat/t', 'main']) {
+    git(dir, ['checkout', '-q', target]);
+    assertEqual(
+      fs.readFileSync(usage.ledgerPath(dir), 'utf8'),
+      before,
+      `ledger byte-identical after checkout ${target}`,
+    );
+  }
+  assertEqual(usage.readUsage(dir).rows.length, 1, 'the one recorded row, on every branch');
+  assertEqual(git(dir, ['status', '--porcelain']).trim(), '', 'nothing written in the tree');
 });
 
-// --- policy: commit_usage key (T11 deviation — added to §2 schema/defaults) ------
+test('crash immunity (stage 108): rows written before a checkout switch stay visible to the daily breaker with no restore step', () => {
+  const dir = repoWithOriginTrackingLedger();
+  const now = new Date('2026-06-10T12:00:00.000Z');
+  usage.record(dir, { ...SUMMARY, runId: 'run-a' }, { now });
+  git(dir, ['checkout', '-q', '-b', 'feat/stage-1', 'origin/main']);
+  usage.record(dir, { ...SUMMARY, runId: 'run-b' }, { now });
+  // The "run" dies here: no summarize, no restore — the tree is left on a
+  // branch that tracks the ledger. The next run's breaker must see both runs.
+  const check = usage.checkDailyLimits(dir, { max_runs_per_day: 2 }, { now });
+  assertEqual(check.ok, false, 'the breaker trips on the rows the crash left');
+  assertEqual(check.totals.runs, 2);
+});
 
-test('policy: commit_usage defaults to true and validates as a boolean', () => {
-  assertEqual(autonomy.DEFAULTS.commit_usage, true, 'default true per §3.4');
+test('ledgerPath (stage 108): git dir sidecar inside a repo (also from a subdirectory); tree path outside git', () => {
+  const plain = tmpDir();
+  assertEqual(
+    usage.ledgerPath(plain),
+    path.join(plain, '.verity', 'usage.csv'),
+    'non-git fallback',
+  );
+  assertEqual(usage.usagePath(plain), usage.ledgerPath(plain), 'usagePath is the same resolver');
+  const dir = repoWithTrackedLedger();
+  assertEqual(usage.ledgerPath(dir), sidecar(dir));
+  fs.mkdirSync(path.join(dir, 'sub', 'deeper'), { recursive: true });
+  const fromSub = usage.ledgerPath(path.join(dir, 'sub', 'deeper'));
+  assertEqual(path.basename(fromSub), 'usage.csv');
+  assertEqual(
+    fs.realpathSync(path.dirname(path.dirname(fromSub))),
+    fs.realpathSync(path.join(dir, '.git')),
+    'a subdirectory resolves the same sidecar',
+  );
+  assert(!fs.existsSync(path.dirname(sidecar(dir))), 'resolution creates nothing');
+  // A directory that becomes a repository later is not pinned to the fallback.
+  const later = tmpDir();
+  assertEqual(usage.ledgerPath(later), path.join(later, '.verity', 'usage.csv'));
+  git(later, ['init', '-q']);
+  assertEqual(usage.ledgerPath(later), sidecar(later), 'the fallback is never cached');
+});
+
+test('ledgerPath (stage 108): a `git worktree add` checkout gets its OWN sidecar', () => {
+  const dir = repoWithTrackedLedger();
+  const wt = path.join(tmpDir(), 'wt');
+  git(dir, ['worktree', 'add', '-q', '-b', 'feat/wt', wt]);
+  const wtPath = usage.ledgerPath(wt);
+  assert(wtPath !== usage.ledgerPath(dir), 'distinct files');
+  assert(
+    wtPath.includes(`${path.sep}worktrees${path.sep}`),
+    `inside the worktree's git dir: ${wtPath}`,
+  );
+  usage.record(wt, { ...SUMMARY, runId: 'run-wt' });
+  usage.record(dir, { ...SUMMARY, runId: 'run-main' });
+  assertEqual(
+    usage
+      .readUsage(wt)
+      .rows.map((r) => r.run_id)
+      .join(','),
+    'run-wt',
+  );
+  assertEqual(
+    usage
+      .readUsage(dir)
+      .rows.map((r) => r.run_id)
+      .join(','),
+    'run-main',
+  );
+  assertEqual(git(wt, ['status', '--porcelain']).trim(), '', 'the worktree tree stays clean');
+});
+
+test('cli (stage 108): `usage --json` reports the resolved ledger path', () => {
+  const dir = repoWithTrackedLedger();
+  usage.record(dir, SUMMARY);
+  const { out, code } = runCli(['usage', '--json'], dir);
+  assertEqual(code, 0);
+  assertEqual(
+    fs.realpathSync(JSON.parse(out).path),
+    fs.realpathSync(sidecar(dir)),
+    '`path` names the git-dir sidecar',
+  );
+  const plain = tmpDir();
+  assertEqual(
+    JSON.parse(runCli(['usage', '--json'], plain).out).path,
+    path.join(plain, '.verity', 'usage.csv'),
+    'outside git: the tree path, as before',
+  );
+});
+
+test('record (stage 108): commit_usage true performs NO commit; loadPolicy warns exactly once', () => {
+  const dir = repoWithTrackedLedger();
+  fs.writeFileSync(path.join(dir, '.verity', 'autonomy.yml'), 'commit_usage: true\n');
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-q', '-m', 'an old policy that still says commit_usage: true']);
+  const refsBefore = refs(dir);
+  const countBefore = commitCount(dir);
+  const warnings = [];
+  const policy = autonomy.loadPolicy(dir, { warn: (m) => warnings.push(m) });
+  assertEqual(warnings.length, 1, 'exactly one warning');
+  assertEqual(warnings[0], autonomy.COMMIT_USAGE_IGNORED_WARNING);
+  assert(warnings[0].includes('ADR-0036'), 'the warning names the ADR');
+  assertEqual(policy.commit_usage, true, 'still a valid key — the policy loads, never errors');
+  assertEqual(
+    JSON.stringify(autonomy.loadPolicy(dir)),
+    JSON.stringify(policy),
+    'the warn seam never changes the loaded policy',
+  );
+  usage.record(dir, SUMMARY, { commit: policy.commit_usage });
+  assertEqual(refs(dir), refsBefore, 'no ref moved');
+  assertEqual(commitCount(dir), countBefore, 'git log unchanged on every ref');
+  assertEqual(git(dir, ['status', '--porcelain']).trim(), '', 'nothing written in the tree');
+  // No key, or an explicit false: no warning at all.
+  for (const text of ['mode: supervised\n', 'commit_usage: false\n']) {
+    fs.writeFileSync(path.join(dir, '.verity', 'autonomy.yml'), text);
+    const none = [];
+    autonomy.loadPolicy(dir, { warn: (m) => none.push(m) });
+    assertEqual(none.length, 0, `no warning for: ${text.trim()}`);
+  }
+});
+
+test('cli (stage 108): autonomy validate on commit_usage: true exits 0 with ONE stderr warning', () => {
   const dir = tmpDir();
   fs.mkdirSync(path.join(dir, '.verity'), { recursive: true });
-  fs.writeFileSync(path.join(dir, '.verity', 'autonomy.yml'), 'commit_usage: false\n');
-  assertEqual(autonomy.loadPolicy(dir).commit_usage, false, 'file value merges over default');
+  fs.writeFileSync(path.join(dir, '.verity', 'autonomy.yml'), 'commit_usage: true\n');
+  const { out, err, code } = runCli(['autonomy', 'validate', '--json'], dir);
+  assertEqual(code, 0, 'a dead key is never an error');
+  const obj = JSON.parse(out.trim());
+  assertEqual(obj.valid, true);
+  assertEqual(
+    JSON.stringify(obj.warnings),
+    JSON.stringify([autonomy.COMMIT_USAGE_IGNORED_WARNING]),
+  );
+  const warnLines = err.split('\n').filter((l) => l.includes('commit_usage is ignored'));
+  assertEqual(warnLines.length, 1, 'one warning line on stderr');
+  // A policy without the key validates byte-identically to before (no warnings key).
+  fs.writeFileSync(path.join(dir, '.verity', 'autonomy.yml'), 'mode: supervised\n');
+  const plain = JSON.parse(runCli(['autonomy', 'validate', '--json'], dir).out.trim());
+  assertEqual(Object.keys(plain).join(','), 'valid,path,exists,raw', 'unchanged result shape');
+});
+
+// --- stage 108: `verity usage untrack` (operator-only) --------------------------------
+
+test('untrack: a tracked ledger → ONE bot commit touching exactly .gitignore + the removal', () => {
+  const dir = repoWithTrackedLedger();
+  // Something the operator has staged must NOT be swept into the commit.
+  fs.writeFileSync(path.join(dir, 'staged.txt'), 'operator work\n');
+  git(dir, ['add', 'staged.txt']);
+  const before = fs.readFileSync(treeLedger(dir), 'utf8');
+  const headBefore = git(dir, ['rev-parse', 'HEAD']).trim();
+  const res = usage.untrackLedger(dir);
+  assertEqual(res.error, null);
+  assertEqual(res.ok, true);
+  assertEqual(res.changed, true);
+  assertEqual(res.tracked, true);
+  assertEqual(res.ignore_added, true);
+  assertEqual(res.gitignore_refreshed, true, 'no local .gitignore → refreshed from the new HEAD');
+  assertEqual(git(dir, ['log', '-1', '--format=%s']).trim(), usage.MIGRATION_MESSAGE);
+  assertEqual(git(dir, ['rev-parse', 'HEAD^']).trim(), headBefore, 'one parent: the old HEAD');
+  assertEqual(
+    git(dir, ['log', '-1', '--format=%an <%ae>|%cn <%ce>']).trim(),
+    `${usage.COMMIT_AUTHOR_NAME} <${usage.COMMIT_AUTHOR_EMAIL}>|${usage.COMMIT_AUTHOR_NAME} <${usage.COMMIT_AUTHOR_EMAIL}>`,
+    'authored and committed by the bot identity',
+  );
+  const touched = git(dir, ['show', '--name-status', '--format=', 'HEAD'])
+    .trim()
+    .split('\n')
+    .sort();
+  assertEqual(touched.join('|'), 'A\t.gitignore|D\t.verity/usage.csv', 'exactly the two paths');
+  assertEqual(res.commit, git(dir, ['rev-parse', 'HEAD']).trim());
+  assertEqual(
+    git(dir, ['symbolic-ref', 'HEAD']).trim(),
+    'refs/heads/main',
+    'the branch moved, HEAD still attached',
+  );
+  assertEqual(
+    fs.readFileSync(treeLedger(dir), 'utf8'),
+    before,
+    'the working-tree ledger is kept byte-for-byte (index-only removal)',
+  );
+  assertEqual(git(dir, ['ls-files', '--', '.verity/usage.csv']).trim(), '', 'no longer tracked');
+  git(dir, ['check-ignore', '-q', '.verity/usage.csv']); // throws unless ignored
+  assertEqual(
+    git(dir, ['status', '--porcelain']).trim(),
+    'A  staged.txt',
+    'the operator’s staged work is still staged, and nothing else is dirty',
+  );
+  const ignoreLines = fs
+    .readFileSync(path.join(dir, '.gitignore'), 'utf8')
+    .split('\n')
+    .filter((l) => l === '.verity/usage.csv');
+  assertEqual(ignoreLines.length, 1, 'the ignore line, once');
+  assertEqual(usage.isLedgerTracked(dir), false);
+  assert(
+    !fs.existsSync(path.join(dir, '.git', 'info', 'exclude')) ||
+      !fs.readFileSync(path.join(dir, '.git', 'info', 'exclude'), 'utf8').includes('usage.csv'),
+    'no .git/info/exclude line (dropped with the sidecar)',
+  );
+});
+
+test('untrack F3: unrelated .gitignore edits — unstaged or staged — are NEVER swept into the commit', () => {
+  for (const staged of [false, true]) {
+    const dir = gitRepo();
+    git(dir, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
+    writeCsv(dir, [usage.HEADER, ROW_1]);
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-q', '-m', 'baseline']);
+    fs.appendFileSync(path.join(dir, '.gitignore'), 'operator-local-secret/\n');
+    if (staged) {
+      git(dir, ['add', '.gitignore']);
+    }
+    const res = usage.untrackLedger(dir);
+    assertEqual(res.changed, true, `committed (${res.error})`);
+    const committed = git(dir, ['show', 'HEAD:.gitignore']);
+    assertEqual(
+      committed,
+      `node_modules/\n${usage.LEDGER_IGNORE_COMMENT}\n.verity/usage.csv\n`,
+      `HEAD's .gitignore + the ignore line, nothing else (staged=${staged})`,
+    );
+    assertEqual(res.gitignore_refreshed, false, 'a locally modified .gitignore is left alone');
+    assert(res.reason.includes('left as it is'), `says so: ${res.reason}`);
+    assert(
+      fs.readFileSync(path.join(dir, '.gitignore'), 'utf8').includes('operator-local-secret/'),
+      'the operator’s edit is still in the working file',
+    );
+    if (staged) {
+      assert(
+        git(dir, ['show', ':.gitignore']).includes('operator-local-secret/'),
+        'a staged edit stays staged, not committed',
+      );
+    }
+    assertEqual(git(dir, ['ls-files', '--', '.verity/usage.csv']).trim(), '', 'untracked');
+  }
+});
+
+test('untrack F4: failing hooks cannot block it (plumbing — no hook runs)', () => {
+  const dir = repoWithTrackedLedger();
+  const hooks = path.join(dir, '.git', 'hooks');
+  fs.mkdirSync(hooks, { recursive: true });
+  for (const hook of ['pre-commit', 'commit-msg', 'post-commit', 'reference-transaction']) {
+    const file = path.join(hooks, hook);
+    fs.writeFileSync(file, `#!/bin/sh\necho ${hook} ran >> "${dir}/hooks.log"\nexit 1\n`);
+    fs.chmodSync(file, 0o755);
+  }
+  const res = usage.untrackLedger(dir);
+  assertEqual(res.error, null, 'no hook failure surfaces');
+  assertEqual(res.changed, true);
+  assertEqual(git(dir, ['log', '-1', '--format=%s']).trim(), usage.MIGRATION_MESSAGE);
+  assert(!fs.existsSync(path.join(dir, 'hooks.log')), 'no hook ran');
+});
+
+test('untrack F2: refuses (ok:false, named) while a merge / cherry-pick / revert / rebase is in progress', () => {
+  for (const [marker, isDir] of [
+    ['MERGE_HEAD', false],
+    ['CHERRY_PICK_HEAD', false],
+    ['REVERT_HEAD', false],
+    ['rebase-merge', true],
+    ['rebase-apply', true],
+  ]) {
+    const dir = repoWithTrackedLedger();
+    const at = path.join(dir, '.git', marker);
+    if (isDir) {
+      fs.mkdirSync(at);
+    } else {
+      fs.writeFileSync(at, `${git(dir, ['rev-parse', 'HEAD']).trim()}\n`);
+    }
+    const count = commitCount(dir);
+    const res = usage.untrackLedger(dir);
+    assertEqual(res.ok, false, `${marker}: refused`);
+    assertEqual(res.refused, marker, 'the marker is named');
+    assertEqual(res.changed, false);
+    assert(res.reason.includes(marker), `reason names it: ${res.reason}`);
+    assertEqual(commitCount(dir), count, `${marker}: no commit`);
+    assertEqual(usage.isLedgerTracked(dir), true, `${marker}: still tracked, nothing written`);
+    if (marker === 'MERGE_HEAD') {
+      const cli = runCli(['usage', 'untrack', '--json'], dir);
+      assertEqual(cli.code, 1, 'the CLI exits non-zero on a refusal');
+      assertEqual(JSON.parse(cli.out).refused, 'MERGE_HEAD', 'and prints the refusal object');
+    }
+  }
+});
+
+test('untrack: second call is a no-op (changed:false, no commit); a repo with no ledger is a no-op', () => {
+  const dir = repoWithTrackedLedger();
+  usage.untrackLedger(dir);
+  const count = commitCount(dir);
+  const again = usage.untrackLedger(dir);
+  assertEqual(again.changed, false, 'idempotent');
+  assertEqual(again.commit, null);
+  assert(again.reason.includes('not tracked'), `says so: ${again.reason}`);
+  assertEqual(commitCount(dir), count, 'no second commit');
+
+  const empty = gitRepo();
+  fs.writeFileSync(path.join(empty, 'README.md'), 'x\n');
+  git(empty, ['add', '-A']);
+  git(empty, ['commit', '-q', '-m', 'no ledger here']);
+  const res = usage.untrackLedger(empty);
+  assertEqual(res.changed, false, 'no ledger → nothing to untrack');
+  assertEqual(commitCount(empty), '1', 'no commit');
+  assert(!fs.existsSync(treeLedger(empty)), 'no ledger conjured');
+
+  const notRepo = usage.untrackLedger(tmpDir());
+  assertEqual(notRepo.changed, false, 'outside a repository: a no-op, never a throw');
+  assertEqual(notRepo.error, null);
+});
+
+test('untrack F6: a ledger staged but never committed → unstaged, changed:true even when no commit is needed', () => {
+  const dir = gitRepo();
+  git(dir, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
+  fs.writeFileSync(path.join(dir, '.gitignore'), `${usage.LEDGER_IGNORE_LINE}\n`);
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-q', '-m', 'baseline already ignoring the ledger']);
+  writeCsv(dir, [usage.HEADER, ROW_1]);
+  git(dir, ['add', '-f', '--', '.verity/usage.csv']);
+  const count = commitCount(dir);
+  const res = usage.untrackLedger(dir);
+  assertEqual(res.changed, true, 'the index was written');
+  assertEqual(res.commit, null, 'the tree equals HEAD — no commit');
+  assertEqual(commitCount(dir), count);
+  assertEqual(git(dir, ['ls-files', '--', '.verity/usage.csv']).trim(), '', 'unstaged');
+  assert(fs.existsSync(treeLedger(dir)), 'the working file is kept');
+});
+
+test('stage 108: the untrack commit succeeds with NO ambient git identity (stage-38 carry-over)', () => {
+  const dir = bareGitRepo();
+  writeCsv(dir, [usage.HEADER, ROW_1]);
+  withNoGitIdentity(() => {
+    git(dir, ['add', '-A']);
+    git(dir, [...usage.botIdentityGitArgs(), 'commit', '-q', '-m', 'baseline']);
+  });
+  const res = withNoGitIdentity(() => usage.untrackLedger(dir));
+  assertEqual(res.changed, true, `untrack commits even with no git identity (${res.error})`);
+  const who = withNoGitIdentity(() =>
+    git(dir, ['log', '-1', '--format=%an <%ae>|%cn <%ce>']).trim(),
+  );
+  assertEqual(
+    who,
+    'verity-worker <verity-worker@users.noreply.github.com>|verity-worker <verity-worker@users.noreply.github.com>',
+    'a single -c pair covers author AND committer',
+  );
+});
+
+test('cli: usage untrack --json → exactly one JSON object; a second call reports changed:false', () => {
+  const dir = repoWithTrackedLedger();
+  const first = runCli(['usage', 'untrack', '--json'], dir);
+  assertEqual(first.code, 0, first.err);
+  assertEqual(first.out.trim().split('\n').length, 1, 'stdout is exactly one line');
+  assertEqual(JSON.parse(first.out).changed, true);
+  const second = runCli(['usage', 'untrack', '--json'], dir);
+  assertEqual(JSON.parse(second.out).changed, false);
+  const bad = runCli(['usage', 'bogus'], dir);
+  assertEqual(bad.code, 1, 'an unknown usage verb is an error');
+  assert(bad.err.includes('untrack|recover'), 'the error names the verbs');
+});
+
+// --- stage 108: `verity usage recover` ----------------------------------------------
+
+test('recover: sidecar + tree file + two orphaned usage commits → the sorted union in the SIDECAR; tree byte-identical; idempotent; malformed blob skipped', () => {
+  const dir = gitRepo();
+  git(dir, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
+  fs.writeFileSync(path.join(dir, 'README.md'), 'x\n');
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-q', '-m', 'baseline']);
+  usageCommitOnBranch(dir, 'feat/1', `${usage.HEADER}\n${ROW_1}\n`, 'chore(verity): usage run-1');
+  usageCommitOnBranch(dir, 'feat/2', `${usage.HEADER}\n${ROW_2}\n`, 'chore(verity): usage run-2');
+  usageCommitOnBranch(dir, 'feat/3', 'not,a,ledger\n', 'chore(verity): usage run-bad');
+  // The untrack commit carries no ledger and is excluded, never "skipped".
+  git(dir, ['commit', '-q', '--allow-empty', '-m', usage.MIGRATION_MESSAGE]);
+  // The legacy in-tree file holds ROW_1 (as a pre-108 checkout would) …
+  writeCsv(dir, [usage.HEADER, ROW_1]);
+  const treeBefore = fs.readFileSync(treeLedger(dir));
+  // … and the sidecar already has a post-108 row.
+  fs.mkdirSync(path.dirname(sidecar(dir)), { recursive: true });
+  fs.writeFileSync(sidecar(dir), `${usage.HEADER}\n${ROW_3}\n`);
+  const res = usage.recoverLedger(dir);
+  assertEqual(res.path, usage.ledgerPath(dir), 'reports the sidecar path');
+  assertEqual(res.commits_scanned, 3, 'three usage commits across all refs');
+  assertEqual(res.commits_skipped, 1, 'the malformed blob is skipped and counted');
+  assertEqual(res.tree_rows, 1, 'the in-tree file is counted');
+  assertEqual(res.rows_before, 1, 'the sidecar row');
+  assertEqual(res.rows_added, 2);
+  assertEqual(res.rows_after, 3);
+  const text = fs.readFileSync(sidecar(dir), 'utf8');
+  assertEqual(
+    text,
+    `${usage.HEADER}\n${ROW_1}\n${ROW_2}\n${ROW_3}\n`,
+    'header first, sorted by ts',
+  );
+  assert(fs.readFileSync(treeLedger(dir)).equals(treeBefore), 'the tree file is byte-identical');
+  const again = usage.recoverLedger(dir);
+  assertEqual(again.rows_added, 0, 'a second run adds nothing');
+  assertEqual(again.rows_after, 3);
+  assertEqual(fs.readFileSync(sidecar(dir), 'utf8'), text, 'untouched');
+  assert(fs.readFileSync(treeLedger(dir)).equals(treeBefore), 'still byte-identical');
+});
+
+test('recover: outside a git repository it throws, never writes', () => {
+  const dir = tmpDir();
+  let threw = false;
+  try {
+    usage.recoverLedger(dir);
+  } catch (e) {
+    threw = true;
+    assert(e.message.includes('not inside a git repository'), e.message);
+  }
+  assertEqual(threw, true);
+});
+
+test('seedLedger (stage 108): first call seeds the sidecar from tree + history; second call seeds nothing; non-git is a no-op', () => {
+  const dir = repoWithTrackedLedger();
+  usageCommitOnBranch(
+    dir,
+    'feat/old',
+    `${usage.HEADER}\n${ROW_1}\n${ROW_2}\n`,
+    'chore(verity): usage run-2',
+  );
+  const refsBefore = refs(dir);
+  const first = usage.seedLedger(dir);
+  assertEqual(first.seeded, 2, 'ROW_1 (tree) + ROW_2 (history)');
+  assertEqual(first.tracked, true, 'reports the still-tracked tree file');
+  assertEqual(usage.readUsage(dir).rows.length, 2);
+  const second = usage.seedLedger(dir);
+  assertEqual(second.seeded, 0, 'the sidecar exists — nothing seeded');
+  assertEqual(refs(dir), refsBefore, 'git reads only — no ref moved');
+  assertEqual(git(dir, ['status', '--porcelain']).trim(), '', 'nothing written in the tree');
+  const plain = tmpDir();
+  const res = usage.seedLedger(plain);
+  assertEqual(res.git, false);
+  assertEqual(res.seeded, 0);
+  assert(!fs.existsSync(path.join(plain, '.verity')), 'nothing written');
+});
+
+test('cli: usage recover --json → exactly one JSON object with the counts', () => {
+  const dir = repoWithTrackedLedger();
+  git(dir, ['checkout', '-q', '-b', 'feat/x']);
+  fs.appendFileSync(treeLedger(dir), `${ROW_2}\n`);
+  git(dir, ['commit', '-q', '-am', 'chore(verity): usage run-2']);
+  git(dir, ['checkout', '-q', '-b', 'feat/y', 'main']);
+  const { out, code, err } = runCli(['usage', 'recover', '--json'], dir);
+  assertEqual(code, 0, err);
+  assertEqual(out.trim().split('\n').length, 1, 'stdout is exactly one line');
+  const obj = JSON.parse(out);
+  assertEqual(fs.realpathSync(obj.path), fs.realpathSync(sidecar(dir)));
+  assertEqual(obj.commits_scanned, 1);
+  assertEqual(obj.tree_rows, 1);
+  assertEqual(obj.rows_before, 0);
+  assertEqual(obj.rows_added, 2);
+  assertEqual(obj.rows_after, 2);
+});
+
+test('ensureIgnoreLine: idempotent, creates the file, and recognizes an anchored spelling', () => {
+  const dir = tmpDir();
+  const file = path.join(dir, '.gitignore');
+  assertEqual(usage.ensureIgnoreLine(file), true, 'created');
+  assertEqual(usage.ensureIgnoreLine(file), false, 'second call writes nothing');
+  const text = fs.readFileSync(file, 'utf8');
+  assertEqual(text.split('\n').filter((l) => l === '.verity/usage.csv').length, 1);
+  assert(text.includes('ADR-0036'), 'the comment cites the ADR');
+  fs.writeFileSync(file, 'node_modules/\n/.verity/usage.csv'); // no trailing newline
+  assertEqual(usage.ensureIgnoreLine(file), false, 'an anchored line already counts');
+  fs.writeFileSync(file, 'node_modules/');
+  usage.ensureIgnoreLine(file);
+  assert(
+    fs.readFileSync(file, 'utf8').startsWith('node_modules/\n#'),
+    'appended on its own line even without a trailing newline',
+  );
+});
+
+// --- policy: commit_usage key (T11; ignored since stage 108) -----------------------
+
+test('policy: commit_usage defaults to false (stage 108) and still validates as a boolean', () => {
+  assertEqual(autonomy.DEFAULTS.commit_usage, false, 'default false — the key is ignored');
+  const dir = tmpDir();
+  fs.mkdirSync(path.join(dir, '.verity'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.verity', 'autonomy.yml'), 'commit_usage: true\n');
+  assertEqual(autonomy.loadPolicy(dir).commit_usage, true, 'file value merges over default');
   fs.writeFileSync(path.join(dir, '.verity', 'autonomy.yml'), 'commit_usage: sometimes\n');
   let threw = false;
   try {
@@ -724,7 +1236,8 @@ test('policy: commit_usage defaults to true and validates as a boolean', () => {
     fs.readFileSync(path.join(__dirname, '..', 'schemas', 'autonomy.schema.json'), 'utf8'),
   );
   assertEqual(schema.properties.commit_usage.type, 'boolean', 'shipped JSON schema has the key');
-  assertEqual(schema.properties.commit_usage.default, true);
+  assertEqual(schema.properties.commit_usage.default, false);
+  assert(schema.properties.commit_usage.description.includes('ADR-0036'), 'documented as ignored');
 });
 
 // --- CLI: `verity usage [--days 7] [--json]` --------------------------------------

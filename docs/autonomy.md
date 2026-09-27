@@ -58,8 +58,9 @@ performs **one tick**:
    `verity agent-exec` (the only place an AI agent is invoked), repeat — until
    idle, a human gate, a failure, or a per-run limit.
 5. **Summarize**: one audit comment per run (roles, outcome, tokens, est. cost,
-   wall time), one `.verity/usage.csv` row appended per role invocation (all
-   sharing the run id), lock released — always, even on crash paths.
+   wall time), one usage-ledger row appended per role invocation (all sharing
+   the run id; see [Usage & cost tracking](#usage--cost-tracking)), lock
+   released — always, even on crash paths.
 
 Every action the worker takes is bot-attributed, comment-audited, and priced.
 
@@ -217,7 +218,7 @@ Setup:
 
 Budget guardrails are on by default: the job's `timeout-minutes: 50` hard-caps a
 runaway run at the Actions level, and the worker's own startup checks refuse to
-run once today's `.verity/usage.csv` totals exceed `limits.max_usd_per_day` /
+run once today's usage-ledger totals exceed `limits.max_usd_per_day` /
 `max_runs_per_day` (exit 30 `daily-limit`) — or once today's costs cannot be
 verified at all (exit 30 `unknown-cost-budget`, see [Limits](#limits)).
 
@@ -308,10 +309,10 @@ If you see that note, you have two supported paths:
 
 ## Usage & cost tracking
 
-Every run appends one row **per role invocation** to `.verity/usage.csv`
+Every run appends one row **per role invocation** to the usage ledger
+(`<git-dir>/verity/usage.csv`, or `.verity/usage.csv` outside git; see below)
 (`timestamp,run_id,repo,roles,tokens_in,tokens_out,est_usd,wall_secs,outcome,tool_calls,role,gate,provider,model`),
-all rows of a run sharing its `run_id`, and commits them (`commit_usage: true`
-by default). `gate` is the human gate the *run* ended paused at, if any — the
+all rows of a run sharing its `run_id`. `gate` is the human gate the *run* ended paused at, if any — the
 same value on every row of the run; it is how the startup breaker can tell an
 unknown-cost run that already asked a human (parked at the `unknown-cost`
 gate) from unknown spend that slipped through ungated. Pre-existing ledgers
@@ -327,6 +328,56 @@ verity usage --days 7            # runs, tokens, est USD, tool calls, outcomes h
 verity usage --days 7 --json
 verity usage --days 7 --by-role  # adds per-role totals (tokens, est USD, tool calls)
 ```
+
+**The ledger is runtime state, never committed** (since 1.6, stage 108,
+ADR-0036). Inside a git repository the ledger lives in the git directory, at
+`<git-dir>/verity/usage.csv` (usually `.git/verity/usage.csv`). Checkout, merge,
+reset, clean and stash never touch the git directory, so every branch the worker
+checks out sees the same rows. Each `git worktree add` checkout has its own git
+directory and so its own ledger. Outside a git repository the ledger is
+`.verity/usage.csv` in the working directory, as before. `verity usage --json`
+reports the file in use as `path`. Every reader resolves the same file: the daily
+breakers, `verity operator usage|runs|snapshot`, the console and the benchmark
+scorecard. The scaffold `.gitignore` still ignores `.verity/usage.csv`, so a
+stray copy in the tree is never committed.
+
+Older versions wrote `.verity/usage.csv` in the working tree and committed each
+run's rows (`chore(verity): usage <run-id>`) on the stage branch the run had just
+built on. The next stage branch, forked from the merged default branch, did not
+have that commit, so the rows vanished from the file. The policy key
+`commit_usage` is still accepted so older policies load, but it is ignored, and
+setting it to `true` prints one warning. The ledger is per checkout: a fresh
+clone starts empty.
+
+On its first run in a repository from before 1.6, the worker seeds the new
+ledger once. It merges the old `.verity/usage.csv` and the rows of every old
+`chore(verity): usage` commit into it, and logs `seeded ledger: N rows`. This
+only reads git: the worker makes no commit and writes nothing in the working
+tree. If the tree still tracks `.verity/usage.csv`, the worker prints one warning
+naming `verity usage untrack`. Two verbs are available to the operator:
+
+```bash
+verity usage untrack [--json]   # stop tracking the stale in-tree file: one commit (.gitignore + removal); no-op if already untracked
+verity usage recover [--json]   # merge the in-tree file and every old `chore(verity): usage` commit into the live ledger
+```
+
+`untrack` is for the operator; the worker never runs it. It makes one commit,
+authored by the bot identity, that adds the ignore line to `.gitignore` and
+removes `.verity/usage.csv` from git. The file on disk is kept. Ship it the way
+you ship any other change (for example, on a branch through a reviewed PR). The
+commit is built from `HEAD`'s `.gitignore` plus the ignore line, so unrelated
+`.gitignore` edits you have not committed are never included, and no git hooks
+run. Your working `.gitignore` is refreshed only if you had not changed it. It
+refuses, with `ok: false` and exit 1, while a merge, cherry-pick, revert or
+rebase is in progress. Until the change is merged, the tracked file is stale
+history: nothing writes to it and only `recover` reads it.
+
+`recover` writes only the live ledger and never changes the in-tree file. It
+reports `path`, `commits_scanned`, `tree_rows` (rows in the in-tree file),
+`rows_before`, `rows_added` and `rows_after`. A second run adds nothing. A
+commit whose ledger cannot be read is skipped and counted (`commits_skipped`),
+and so is a malformed row (`rows_skipped`). `verity doctor` shows a warning row
+while `.verity/usage.csv` is still tracked.
 
 **Honest-measurement note:** this telemetry covers **headless runs only** —
 role invocations that pass through `verity agent-exec` (i.e. the worker).
@@ -399,6 +450,31 @@ worker refuses exactly as before, before taking any lock or writing any label.
 Genuine overspend is still reported as overspend: if the *verified* portion of
 today's spend already meets `max_usd_per_day`, that is a plain `daily-limit`
 trip regardless of this knob — no approval masks it.
+
+**Every GitHub and git call has a deadline.** `max_wall_clock_min` is checked
+*between* role dispatches, so it cannot interrupt a call that never returns —
+on a lost network that used to mean a worker alive for hours with nothing to
+show. Since 1.6 every `gh`/`git` subprocess on the worker path is killed
+(SIGTERM) at a fixed deadline, and git never prompts (`GIT_TERMINAL_PROMPT=0`):
+
+| call | deadline | on timeout |
+|---|---|---|
+| `gh` (labels, comments, PRs, issues, merges, reads) | 60 s per attempt | retried like any transient failure (below), then fails loud |
+| `git fetch` / `pull` / `push` / `clone` / `ls-remote` | 5 min | `ok:false`, reason `timeout` — the same fail-closed refusal a failed push gets |
+| every other `git` (status, commit, checkout, rev-parse…) | 60 s | as above |
+
+The `gh` layer retries **transient** failures up to 3 times with jittered
+backoff: HTTP 5xx, a secondary rate limit, a call killed at its deadline
+(`timeout`), and a **network-level error** (`network` — `network is
+unreachable`, `dial tcp`, `no such host`, `i/o timeout`, `EAI_AGAIN`,
+`connection refused/reset`, `TLS handshake timeout`, `could not resolve host`).
+A 5-second blip therefore costs one backoff, not the tick; a real outage costs
+at most four bounded attempts before the tick ends as `infra` and the error
+names the class. HTTP 4xx and everything else still fail fast. Set
+`VERITY_GH_LOG=1` to get one `verity:gh status=… reason=…` line per attempt on
+stderr (the benchmark harness turns it on for every tick). The status reads
+behind `verity state`/`operator snapshot` are bounded the same way; a read that
+times out is reported as `network` under [Unreadable state](#unreadable-state).
 
 ## Unverified CI
 

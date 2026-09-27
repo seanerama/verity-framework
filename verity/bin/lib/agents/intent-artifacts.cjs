@@ -27,8 +27,11 @@
 //   - Non-fatal, never silent: every failure is a returned object; the caller
 //     (agent-exec's withIntentArtifacts) prints the one stderr line, mirroring
 //     `work-item-reconcile-failed`. This module never throws.
-//   - Bot identity: the stage-38 `verity-worker` identity usage.commitUsage
-//     commits the ledger with (scoped `-c`, never the operator's git config).
+//   - Bot identity: the stage-38 `verity-worker` identity
+//     (usage.botIdentityGitArgs — scoped `-c`, never the operator's git
+//     config). It was introduced for the per-run ledger commit, which stage
+//     108 (ADR-0036) removed: the usage ledger is runtime state, never
+//     committed.
 //   - Push target: the substrate's `origin` (ADR-0029 wires the local bare
 //     origin under the same remote name, so one push path serves both). A
 //     failed push leaves the commit local and is reported, not hidden.
@@ -61,21 +64,35 @@ function firstLine(text) {
 
 // A push that hangs on a credential prompt or a dead remote must not hang the
 // worker: git never prompts (GIT_TERMINAL_PROMPT=0) and every call has a
-// deadline. A timeout surfaces as { ok: false, error } like any other failure.
-const GIT_TIMEOUT_MS = 120_000;
-
-// Result-shaped git: never throws, the first stderr line is the error.
+// deadline. Stage 110: the deadline is the SAME split window git-lifecycle
+// uses (gitTimeoutMs — the network window for fetch/pull/push/clone/ls-remote,
+// the local window for everything else), so the two Verity-performed git paths
+// cannot drift. A timeout surfaces as { ok: false, reason: 'timeout', error }
+// — the existing failure shape plus the class, consumed unchanged.
 function git(cwd, args) {
+  // Lazy: this module sits in a require cycle (autonomy/usage/substrate-local),
+  // and a top-level handle could capture git-lifecycle's exports mid-load.
+  const gitLifecycle = require('./git-lifecycle.cjs');
+  const timeoutMs = gitLifecycle.gitTimeoutMs(args);
   try {
     const stdout = execFileSync('git', ['-C', cwd, ...args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       maxBuffer: 16 * 1024 * 1024,
-      timeout: GIT_TIMEOUT_MS,
+      timeout: timeoutMs,
+      killSignal: 'SIGTERM',
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     });
     return { ok: true, stdout };
   } catch (err) {
+    if (err?.code === 'ETIMEDOUT') {
+      return {
+        ok: false,
+        reason: 'timeout',
+        stdout: err.stdout ? String(err.stdout) : '',
+        error: `git ${gitLifecycle.gitSubcommand(args) || ''} timed out after ${timeoutMs} ms`,
+      };
+    }
     return {
       ok: false,
       stdout: err.stdout ? String(err.stdout) : '',
