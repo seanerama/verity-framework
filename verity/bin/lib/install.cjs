@@ -473,8 +473,10 @@ ${agentAuth.headerDoc}
 # Budget guardrails (ON by default):
 #   - timeout-minutes: 50 hard-caps any single run at the Actions level.
 #   - the worker's startup checks refuse to run (exit 30 daily-limit) once
-#     today's .verity/usage.csv totals exceed limits.max_usd_per_day or
-#     limits.max_runs_per_day from .verity/autonomy.yml.
+#     today's usage-ledger totals (<git-dir>/verity/usage.csv — runtime
+#     state, never committed; a fresh Actions clone starts it empty) exceed
+#     limits.max_usd_per_day or limits.max_runs_per_day from
+#     .verity/autonomy.yml.
 #   - the concurrency group serializes runs: when the 30-minute schedule and
 #     an event fire together (or a cron driver also ticks the same repo),
 #     GitHub queues instead of double-working — and the worker's GitHub lock
@@ -508,7 +510,7 @@ jobs:
         with:
           node-version: 20
       - run: npm i -g verity-framework@^1 @anthropic-ai/claude-code
-      # The worker's usage-ledger commit self-identifies (author verity-worker); no git config step needed.
+      # The usage ledger is runtime state under .git, never committed (stage 108); engine-owned commits self-identify (author verity-worker).
       - run: verity-worker --repo \${{ github.repository }} --once
         env:
           GH_TOKEN: \${{ secrets.VERITY_BOT_TOKEN }}

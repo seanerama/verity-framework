@@ -27,11 +27,11 @@
 //   - Non-fatal, never silent: every failure is a returned object; the caller
 //     (agent-exec's withIntentArtifacts) prints the one stderr line, mirroring
 //     `work-item-reconcile-failed`. This module never throws.
-//   - Bot identity: the stage-38 `verity-worker` identity
+//   - Bot identity: the engine's `verity-worker` identity
 //     (usage.botIdentityGitArgs — scoped `-c`, never the operator's git
-//     config). It was introduced for the per-run ledger commit, which stage
-//     108 (ADR-0036) removed: the usage ledger is runtime state, never
-//     committed.
+//     config), shared with the operator's `verity usage untrack` commit. The
+//     per-run ledger commit it was introduced for (stage 38) is gone since
+//     stage 108 (ADR-0036): the usage ledger is runtime state, never committed.
 //   - Push target: the substrate's `origin` (ADR-0029 wires the local bare
 //     origin under the same remote name, so one push path serves both). A
 //     failed push leaves the commit local and is reported, not hidden.

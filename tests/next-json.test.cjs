@@ -257,3 +257,27 @@ test('decide: no stages at all is idle, not an error', () => {
   assertEqual(d.reason, 'no stages defined');
   assertEqual(nextLib.exitCodeFor(d), 0);
 });
+
+// Stage 111 (ADR-0014 amended, #291): the approval fact rides on the work
+// decision the human approved — present ONLY when the stage carries
+// `verity:approved`, so every unapproved decision stays byte-identical.
+test('decideStage stage 111: approved:true only on a work decision reached through verity:approved', () => {
+  const stg = { number: 7, title: 'Seven', status: 'in-review', pr: 70, issue: 17 };
+  const snap = { prs: [{ number: 70, statusCheckRollup: [{ conclusion: 'SUCCESS' }] }] };
+  const approved = nextLib.decideStage(
+    7,
+    stg,
+    new Set(['verity:awaiting-approval', 'verity:approved']),
+    snap,
+    {},
+  );
+  assertEqual(approved.action, 'work', 'the approved gate falls through to work');
+  assertEqual(approved.role, 'review');
+  assertEqual(approved.approved, true, 'the approval fact is on the decision');
+  const plain = nextLib.decideStage(7, stg, new Set(), snap, {});
+  assertEqual(plain.action, 'work');
+  assert(!('approved' in plain), 'no approval ⇒ no field (byte-identical)');
+  const gated = nextLib.decideStage(7, stg, new Set(['verity:awaiting-approval']), snap, {});
+  assertEqual(gated.action, 'gated');
+  assert(!('approved' in gated), 'a gate never carries the fact');
+});

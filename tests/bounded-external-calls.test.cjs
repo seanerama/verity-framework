@@ -26,11 +26,11 @@
 //   6. a source scan: no execFileSync/spawnSync on the worker's GitHub path is
 //      without a `timeout`.
 //
-// Timing: everything is injected (sleep, clock, spawn) except the two
-// real-subprocess tests, which use a 200 ms deadline against a child that
-// would otherwise live 1.5 s — the kill lands long before the child could
-// finish, so the assertion margin is > 1 s either way.
-const { spawnSync } = require('node:child_process');
+// Timing: everything is injected (sleep, clock, spawn) except the
+// real-subprocess tests, which use a 150-200 ms deadline against a child that
+// would otherwise live 1.5-5 s — the kill lands long before the child could
+// finish, so the assertion margin is > 1 s either way. (Stage 112 made the
+// SIGTERM-trapping tick test real: SIGKILL after a 200 ms grace.)
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -488,17 +488,25 @@ test('tick deadline: run() passes the lock-aligned timeout + SIGTERM on every wo
   assertEqual(ticks[0].options.env.VERITY_GH_LOG, '1', 'the gh retry log is on for the tick');
 });
 
-test('tick deadline: a REAL worker that ignores SIGTERM past the deadline is recorded tick_timeout; the loop proceeds', () => {
+// Stage 112 (#290-3): made REAL — the child TRAPS SIGTERM and would live 5 s.
+// defaultSpawn (the harness's own spawn) escalates to SIGKILL killGraceMs
+// after the SIGTERM, so the tick ends at ~deadline + grace, not when the child
+// chooses to exit. REGRESSION: on main defaultSpawn had no escalation, the
+// SIGTERM was ignored and the harness blocked the full 5 s.
+test('tick deadline: a REAL worker that traps SIGTERM is SIGKILLed after the grace, recorded tick_timeout; the loop proceeds', () => {
   const calls = [];
+  const results = [];
   const spawn = (cmd, _args, options) => {
     calls.push({ cmd, options });
     if (calls.length === 1) {
-      // Ignores SIGTERM and lives on past the 150 ms deadline.
-      return spawnSync(
+      // Traps SIGTERM and would live on for 5 s past the 150 ms deadline.
+      const res = benchmark.defaultSpawn(
         process.execPath,
-        ['-e', "process.on('SIGTERM', () => {}); setTimeout(() => {}, 400);"],
+        ['-e', "process.on('SIGTERM', () => {}); setTimeout(() => {}, 5000);"],
         options,
       );
+      results.push(res);
+      return res;
     }
     return {
       status: 0,
@@ -508,6 +516,7 @@ test('tick deadline: a REAL worker that ignores SIGTERM past the deadline is rec
     };
   };
   const { reader } = sequence([WORKING, WORKING, DONE]);
+  const t0 = Date.now();
   const r = benchmark.drivePipeline({
     repo: 'o/r',
     dir: os.tmpdir(),
@@ -515,14 +524,38 @@ test('tick deadline: a REAL worker that ignores SIGTERM past the deadline is rec
     snapshotReader: reader,
     maxTicks: 10,
     tickTimeoutMs: 150,
+    killGraceMs: 200,
   });
+  const elapsed = Date.now() - t0;
+  // The observable outcome first: killed by SIGKILL, long before the child's 5 s.
+  assert(elapsed < 3000, `the harness did not wait the child out (${elapsed} ms)`);
+  assertEqual(results[0].signal, 'SIGKILL', 'the TERM-trapping child was SIGKILLed');
+  assertEqual(results[0].escalated, true);
   assertEqual(calls[0].options.timeout, 150, 'the deadline reached the spawn');
+  assertEqual(calls[0].options.killSignal, 'SIGTERM', 'TERM first');
+  assertEqual(calls[0].options.killGraceMs, 200, 'the grace reached the spawn');
   assertEqual(r.tickLog[0].tick_outcome, 'tick_timeout');
   assertEqual(r.tickLog[0].outcome, 'tick_timeout', 'no verdict line — the kill is the outcome');
   assertEqual(r.tickLog[1].tick_outcome, 'exited', 'the next tick ran');
   assertEqual(r.tickLog[1].outcome, 'idle');
   assertEqual(r.stopReason, 'done', 'the loop proceeded to a terminal read');
   assertEqual(r.ticks, 2, 'the killed tick still counts against the budget');
+});
+
+test('tick deadline: the default grace is 10 s, and a child that honours SIGTERM is not escalated', () => {
+  assertEqual(benchmark.TICK_KILL_GRACE_MS, 10_000);
+  const { spawn, calls } = workerSpawn();
+  const { reader } = sequence([WORKING, DONE]);
+  benchmark.drivePipeline({ repo: 'o/r', dir: '/x', spawn, snapshotReader: reader, maxTicks: 5 });
+  assertEqual(calls[0].options.killGraceMs, 10_000, 'the tick carries the default grace');
+  const res = benchmark.defaultSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 5000);'], {
+    encoding: 'utf8',
+    timeout: 150,
+    killGraceMs: 2000,
+  });
+  assertEqual(res.signal, 'SIGTERM', 'TERM was enough');
+  assertEqual(res.escalated, false);
+  assertEqual(res.error?.code, 'ETIMEDOUT', 'still a timed-out child');
 });
 
 // --- 5. tick logs --------------------------------------------------------------

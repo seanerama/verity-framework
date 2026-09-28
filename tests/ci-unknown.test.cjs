@@ -663,9 +663,16 @@ test('summaryRoles reads the roles line out of the §7 template, and nothing els
 });
 
 test('countRepeatedRole counts only the trailing run of identical single-role runs', () => {
+  // Each summary is a DISTINCT run (stage 112: the streak counts distinct
+  // (run id, roles) identities, so the fixture names one run per comment).
+  let seq = 0;
+  const nextRunId = () => {
+    seq += 1;
+    return `run-x${seq}`;
+  };
   const summary = (roles) => ({
     body: worker.formatRunSummary({
-      runId: 'run-x',
+      runId: nextRunId(),
       outcome: 'success',
       roles,
       result: 'r',

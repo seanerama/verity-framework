@@ -204,11 +204,13 @@ function countFailures(item, opts = {}) {
   return count;
 }
 
+// Stage 112: adding a label that is already present is a 200 no-op on GitHub,
+// so the label add stays idempotent (retried on every transient class).
 function addLockLabel(item, opts) {
-  gh.run(
-    ['api', '-X', 'POST', `${apiBase(item, opts)}/labels`, '-f', `labels[]=${LOCK_LABEL}`],
-    ghOpts(opts),
-  );
+  gh.run(['api', '-X', 'POST', `${apiBase(item, opts)}/labels`, '-f', `labels[]=${LOCK_LABEL}`], {
+    ...ghOpts(opts),
+    idempotent: true,
+  });
 }
 
 function removeLockLabel(item, opts) {
@@ -218,18 +220,38 @@ function removeLockLabel(item, opts) {
   );
 }
 
+// Stage 112: a comment POST is NOT idempotent — a timed-out POST that landed
+// and was retried posts the lock/unlock line twice (a duplicated
+// `unlock:<id> outcome:failed` would count as two strikes). It is never
+// retried after an ambiguous failure; acquire resolves that case by re-reading
+// the trail (lockLanded below), release reports it like any failed unlock.
 function postComment(item, body, opts) {
-  gh.run(
-    ['api', '-X', 'POST', `${apiBase(item, opts)}/comments`, '-f', `body=${body}`],
-    ghOpts(opts),
-  );
+  gh.run(['api', '-X', 'POST', `${apiBase(item, opts)}/comments`, '-f', `body=${body}`], {
+    ...ghOpts(opts),
+    idempotent: false,
+  });
+}
+
+// Did OUR lock comment land? Read-after-ambiguous for acquire (stage 112): the
+// exact body — run id + expiry, both unique to this attempt — present in the
+// trail means the POST was applied before the failure was reported. A trail
+// that cannot be read answers false (the caller then rethrows the original
+// error — fail closed, the finally-release cleans up).
+function lockLanded(item, body, opts) {
+  try {
+    return fetchComments(item, opts).some((c) => (typeof c === 'string' ? c : c?.body) === body);
+  } catch {
+    return false;
+  }
 }
 
 // acquire(item, {runId, ttlMinutes, now?, repo?, ...ghOpts})
 //   -> { acquired: true, runId, expires, reclaimed: null | {runId, expires} }
 //   -> { acquired: false, reason: 'fresh-lock', holder: {runId, expires} }
 // Throws GhError on GitHub failures (caller's finally-release cleans up any
-// partial acquire) and TypeError on bad arguments.
+// partial acquire) and TypeError on bad arguments. Stage 112: a lock comment
+// whose POST failed ambiguously but DID land (read back from the trail) is an
+// acquired lock, not a failure.
 function acquire(item, opts = {}) {
   const { runId, ttlMinutes } = opts;
   if (typeof runId !== 'string' || runId.length === 0 || /\s/.test(runId)) {
@@ -267,7 +289,17 @@ function acquire(item, opts = {}) {
 
   const expires = new Date(now + ttlMinutes * TTL_FACTOR * 60_000).toISOString();
   addLockLabel(item, opts);
-  postComment(item, lockCommentBody(runId, expires, reclaimed ? reclaimed.runId : null), opts);
+  const body = lockCommentBody(runId, expires, reclaimed ? reclaimed.runId : null);
+  try {
+    postComment(item, body, opts);
+  } catch (err) {
+    // Stage 112: an ambiguous failure (the POST may have landed) is resolved
+    // by the trail itself — our exact lock line present ⇒ the lock is held;
+    // absent (or unreadable) ⇒ the original error, never a second POST.
+    if (err?.ambiguous !== true || !lockLanded(item, body, opts)) {
+      throw err;
+    }
+  }
   return { acquired: true, runId, expires, reclaimed };
 }
 

@@ -544,20 +544,51 @@ function commitMessage(started) {
 // fails when a PR for the head branch exists, and the worker legitimately
 // re-dispatches the same role on the same stage, so an existing PR is the
 // expected steady state, not an error.
-function openPr(cwd, started) {
-  const existing = gh.run(
-    ['pr', 'list', '--head', started.branch, '--json', 'number', '--limit', '1'],
-    { cwd },
-  );
+//
+// Stage 112: `gh pr create` is a non-idempotent write (`idempotent: false`) —
+// never retried after an ambiguous failure. The branch IS a safe read-back key
+// (GitHub allows one open PR per head branch), so an ambiguous failure re-reads
+// `gh pr list --head <branch>`: a PR there is the one this call created —
+// adopted; none ⇒ the original error. `ghOpts` (optional) carries the gh.cjs
+// test seams (exec, sleep, log).
+function findPr(cwd, branch, ghOpts) {
+  const existing = gh.run(['pr', 'list', '--head', branch, '--json', 'number', '--limit', '1'], {
+    ...ghOpts,
+    cwd,
+  });
   const found = JSON.parse(String(existing).trim() || '[]');
-  if (Array.isArray(found) && found.length > 0 && Number.isInteger(found[0].number)) {
-    return found[0].number;
+  return Array.isArray(found) && found.length > 0 && Number.isInteger(found[0].number)
+    ? found[0].number
+    : null;
+}
+
+function openPr(cwd, started, ghOpts = {}) {
+  const existing = findPr(cwd, started.branch, ghOpts);
+  if (existing !== null) {
+    return existing;
   }
   const spec = stage.prSpec(cwd, started.stage);
-  const out = gh.run(
-    ['pr', 'create', '--head', started.branch, '--title', spec.title, '--body', spec.body],
-    { cwd },
-  );
+  let out;
+  try {
+    out = gh.run(
+      ['pr', 'create', '--head', started.branch, '--title', spec.title, '--body', spec.body],
+      { ...ghOpts, cwd, idempotent: false },
+    );
+  } catch (err) {
+    if (err?.ambiguous !== true) {
+      throw err;
+    }
+    let adopted = null;
+    try {
+      adopted = findPr(cwd, started.branch, ghOpts);
+    } catch {
+      adopted = null;
+    }
+    if (adopted === null) {
+      throw err;
+    }
+    return adopted;
+  }
   const m = String(out).match(/\/pull\/(\d+)/);
   return m === null ? null : Number(m[1]);
 }
@@ -642,6 +673,7 @@ module.exports = {
   git,
   gitSubcommand,
   gitTimeoutMs,
+  openPr,
   plan,
   report,
   resolveBase,

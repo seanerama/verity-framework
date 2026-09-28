@@ -225,9 +225,29 @@ const TOKEN_SHAPES = [
 // Anything following an Authorization/Bearer/token keyword, to end of line.
 const CREDENTIAL_LINE = /\b(authorization|bearer|token)\b\s*[:=]?\s*\S.*$/gim;
 
+// Stage 112 (#290-2): the provider-key shapes (sk-ant-, sk-proj-, and the rest
+// of promotion.cjs SECRET_PATTERNS) are redacted too — ONE exported pattern
+// set, owned by promotion.cjs and reused here, so a tick log or any other
+// redacted text can never carry an LLM API key the promotion scanner would
+// have flagged. Resolved lazily at first use: promotion.cjs requires this
+// module at load time, so a load-time require here would be a cycle.
+let secretShapes = null;
+
+function secretPatternShapes() {
+  if (secretShapes === null) {
+    secretShapes = require('./promotion.cjs').SECRET_PATTERNS.map(
+      (p) => new RegExp(p.re.source, p.re.flags.includes('g') ? p.re.flags : `${p.re.flags}g`),
+    );
+  }
+  return secretShapes;
+}
+
 function redact(text) {
   let out = String(text ?? '');
   for (const re of TOKEN_SHAPES) {
+    out = out.replace(re, '[redacted]');
+  }
+  for (const re of secretPatternShapes()) {
     out = out.replace(re, '[redacted]');
   }
   return out.replace(CREDENTIAL_LINE, '$1: [redacted]');

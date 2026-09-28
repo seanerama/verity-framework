@@ -85,13 +85,17 @@
 //   - `ledgerPath(cwd)` (alias `usagePath`) → `<git-dir>/verity/usage.csv`
 //     (`git rev-parse --git-dir`, absolute, per-worktree by construction);
 //     `<cwd>/.verity/usage.csv` only when cwd is not inside a git repository.
-//     EVERY reader and writer resolves the file through it;
+//     EVERY reader and writer resolves the file through it. Stage 112: it
+//     fails CLOSED — a git error other than "not a git repository" inside a
+//     repository throws LedgerPathError instead of falling back;
 //   - `record` appends only — no git at all; policy `commit_usage` is ignored
 //     (autonomy.cjs warns when it is set true);
 //   - `recoverLedger` (`verity usage recover`, and the worker's one-time seed
 //     via `seedLedger`) unions the sidecar, the legacy working-tree file and
 //     every historical `chore(verity): usage` commit into the SIDECAR — git
-//     reads only, the working tree is never written;
+//     reads only, the working tree is never written; since stage 112 the
+//     sidecar is replaced by temp-file + rename, re-read just before the
+//     rename so a concurrent append survives;
 //   - `untrackLedger` (`verity usage untrack`, operator-only — the worker never
 //     calls it) stops tracking the stale in-tree file with one plumbing-built
 //     bot commit, shipped as an ordinary reviewed change;
@@ -152,22 +156,80 @@ const USAGE_COMMIT_GREP = '^chore(verity): usage ';
 // The sidecar's place inside the git directory (stage 108, ADR-0036 amended).
 const SIDECAR_REL_PATH = path.join('verity', 'usage.csv');
 
+// Stage 112 (#283 S1): the ledger's location could not be determined. Thrown by
+// resolveGitDir (and so by ledgerPath and every reader/writer) when git fails
+// for any reason OTHER than "not a git repository" inside what looks like a
+// repository — a `safe.directory` "dubious ownership" refusal (cron or a
+// console running as another user, containers), a malformed config, a timeout,
+// no git binary. Falling back to the in-tree path there would read and write a
+// file no other process uses: the daily breaker would under-read. Callers
+// surface it (the worker refuses the run as infra; the CLI verbs exit non-zero).
+class LedgerPathError extends Error {
+  constructor(cwd, gitError) {
+    super(
+      `cannot locate the usage ledger: \`git rev-parse --git-dir\` in ${cwd} failed (${gitError}) — refusing to fall back to the in-tree ${LEDGER_GIT_PATH}, which other processes do not use (stage 112)`,
+    );
+    this.name = 'LedgerPathError';
+    this.cwd = cwd;
+    this.gitError = gitError;
+  }
+}
+
+// Is there any sign of a git repository at or above `dir`? A `.git` entry
+// (directory, or the file a worktree/submodule uses) walking up to the root, or
+// an explicit GIT_DIR. Used only to tell "git failed because there is no
+// repository here" from "git failed inside a repository".
+function hasGitMarker(dir) {
+  if (typeof process.env.GIT_DIR === 'string' && process.env.GIT_DIR !== '') {
+    return true;
+  }
+  let cur = path.resolve(dir);
+  for (;;) {
+    if (fs.existsSync(path.join(cur, '.git'))) {
+      return true;
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) {
+      return false;
+    }
+    cur = parent;
+  }
+}
+
 // The git directory for `cwd` (absolute), or null when cwd is not inside a git
 // repository. The answer is read from git's OUTPUT and must name an existing
 // directory, so a stand-in `git` that exits 0 for anything (test stubs,
-// wrappers) reads as "not a repository", never as a bogus location.
+// wrappers) is never taken as a bogus location.
+//
+// Stage 112 (#283 S1): FAIL CLOSED. null (→ the in-tree fallback) only when
+// git itself says "not a git repository", or when there is no repository to be
+// found at all (no `.git` walking up, no GIT_DIR) — the two ways "not a
+// repository" is actually true. Any other failure inside something that looks
+// like a repository throws LedgerPathError naming git's error.
 function resolveGitDir(cwd) {
   const res = git(cwd, ['rev-parse', '--git-dir']);
   const out = res.ok ? res.stdout.trim() : '';
-  if (out === '' || out.includes('\n')) {
+  let abs = null;
+  if (out !== '' && !out.includes('\n')) {
+    const candidate = path.resolve(cwd, out);
+    try {
+      abs = fs.statSync(candidate).isDirectory() ? candidate : null;
+    } catch {
+      abs = null;
+    }
+  }
+  if (abs !== null) {
+    return abs;
+  }
+  if ((!res.ok && /not a git repository/i.test(res.stderr)) || !hasGitMarker(cwd)) {
     return null;
   }
-  const abs = path.resolve(cwd, out);
-  try {
-    return fs.statSync(abs).isDirectory() ? abs : null;
-  } catch {
-    return null;
-  }
+  throw new LedgerPathError(
+    cwd,
+    res.ok
+      ? `exit 0 but no usable git directory in its output (${JSON.stringify(out.slice(0, 200))})`
+      : firstErrLine(res),
+  );
 }
 
 // cwd (resolved) → sidecar path, for the process lifetime. Only a git answer
@@ -503,6 +565,37 @@ function writeLedgerFile(file, lines) {
   fs.writeFileSync(file, `${[HEADER, ...sorted].join('\n')}\n`);
 }
 
+// Stage 112 (#283 N4): replace a LIVE ledger file without losing a concurrent
+// append and without ever leaving it truncated. `recover` runs outside the
+// worker lock, so a worker may append a row between recover's read and its
+// write; and a recover killed mid-write used to leave a truncated ledger.
+// Now: write `lines` to a temp file beside the ledger (same directory ⇒ same
+// filesystem ⇒ an atomic rename), then RE-READ the live file immediately
+// before the rename and fold in any row that appeared since `have` was read —
+// then rename over the live file. An interrupted write leaves the live file
+// exactly as it was (the temp file is removed on a thrown error). The
+// remaining window is the re-read→rename instant, not the whole recover.
+// `opts.beforeFinalRead` is a test seam (called after the temp write, before
+// the re-read) — it is how the suite injects a concurrent append.
+function replaceLedgerFile(file, lines, have, opts = {}) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.recover-${process.pid}.tmp`;
+  try {
+    writeLedgerFile(tmp, lines);
+    if (typeof opts.beforeFinalRead === 'function') {
+      opts.beforeFinalRead(tmp);
+    }
+    const late = fileDataLines(file).filter((l) => !have.has(l));
+    if (late.length > 0) {
+      writeLedgerFile(tmp, [...lines, ...late]);
+    }
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
 // Does a .gitignore text already ignore the ledger by an explicit line?
 function hasIgnoreLine(text) {
   return String(text)
@@ -568,6 +661,12 @@ const SHA_RE = /^[0-9a-f]{40,64}$/;
 // git's OUTPUT, not just its exit code, so a stand-in `git` that exits 0 for
 // anything reads as "not a repository", never as "tracked".
 function ledgerGitState(cwd) {
+  // Stage 112: the repository question is resolveGitDir's — so a git failure
+  // inside a repository throws LedgerPathError here too, instead of reading as
+  // "not a repository — nothing to untrack".
+  if (resolveGitDir(cwd) === null) {
+    return null;
+  }
   const top = git(cwd, ['rev-parse', '--show-toplevel']).stdout.trim();
   if (top === '' || !path.isAbsolute(top) || !fs.existsSync(top)) {
     return null;
@@ -608,6 +707,11 @@ const IN_PROGRESS_MARKERS = [
   ['REVERT_HEAD', 'a revert is in progress'],
   ['rebase-merge', 'a rebase is in progress'],
   ['rebase-apply', 'a rebase (or git am) is in progress'],
+  // Stage 112 (#283 N6): a multi-commit cherry-pick/revert keeps its queue in
+  // sequencer/ (it can outlive CHERRY_PICK_HEAD between picks), and a bisect
+  // leaves BISECT_LOG — a commit made mid-bisect lands on a detached probe.
+  ['sequencer', 'a cherry-pick or revert sequence is in progress'],
+  ['BISECT_LOG', 'a bisect is in progress'],
 ];
 
 function operationInProgress(gitDir) {
@@ -766,8 +870,12 @@ function untrackLedger(cwd) {
   try {
     st = ledgerGitState(cwd);
   } catch (err) {
-    st = null;
+    // Stage 112: a git failure (LedgerPathError included) is an error, never
+    // "not a repository" — dispatchUntrack turns it into a non-zero exit.
+    result.ok = false;
     result.error = err.message;
+    result.reason = err.message;
+    return result;
   }
   if (st === null) {
     result.reason = 'not a git repository — nothing to untrack';
@@ -874,7 +982,7 @@ function untrackLedger(cwd) {
 // malformed row (tree file or blob) is dropped and counted (`rows_skipped`).
 // The untrack commit (MIGRATION_MESSAGE) carries no ledger and is excluded.
 // Git READS only. Benchmark records are never touched.
-function recoverLedger(cwd) {
+function recoverLedger(cwd, opts = {}) {
   const gitDir = resolveGitDir(cwd);
   if (gitDir === null) {
     throw new Error(`usage recover: ${cwd} is not inside a git repository`);
@@ -922,7 +1030,7 @@ function recoverLedger(cwd) {
     take(dataLines(blob.stdout));
   }
   if (added.length > 0) {
-    writeLedgerFile(file, [...before, ...added]);
+    replaceLedgerFile(file, [...before, ...added], have, opts);
   }
   return {
     path: file,
@@ -1251,6 +1359,7 @@ module.exports = {
   LEDGER_IGNORE_LINE,
   LEGACY_COLUMNS,
   LEGACY_HEADER,
+  LedgerPathError,
   MIGRATION_MESSAGE,
   STAGE3_COLUMNS,
   STAGE3_HEADER,
@@ -1273,6 +1382,7 @@ module.exports = {
   readUsage,
   record,
   recoverLedger,
+  resolveGitDir,
   rollup,
   rollupByRole,
   seedLedger,

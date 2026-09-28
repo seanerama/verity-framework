@@ -79,7 +79,7 @@ writes a tailored `.verity/autonomy.yml`, the cron line and/or the Actions workf
 bot + secrets checklists, and a `DEPLOYMENT.md` recording your choices.
 
 **B2. Start conservative.** Take the interview's recommended defaults: `mode: supervised`,
-`review.trust: 0` (worker never merges — it gates every PR for you), the default
+`review.trust: 0` (worker never merges on its own — it gates every PR for you, and merges only when you apply `verity:approved` to an approved, green PR), the default
 $25/day cap.
 
 **B3. Give it work.** Open a GitHub issue describing something to build and label it

@@ -2,6 +2,193 @@
 
 ## [Unreleased]
 
+## 1.7.0
+
+### Added
+
+- **`operator work` items carry `depends_on` (stage 111, dev#293).** Each item
+  now has `depends_on: number[]`, the stage file's declared dependencies parsed
+  the same way `verity state` derives `dependsOn` (`[]` for `none`). The field
+  is additive: the item `schema` stays `1` and every existing field is
+  unchanged. The console's stage map can draw real dependency edges with no
+  console change.
+- **`contracts/operator-act-v2.md`: `operator act approve` reports its
+  consequence (stage 111, ADR-0037).** The act contract moves to **v2**. Its
+  invariant 1 no longer says "trust 0 never merges", which stage 111 retired;
+  no verb merges, and the worker is still the sole merge path. `approve` now
+  adds an optional `effect.consequence`: `merge-when-green`, `resume`,
+  `re-review`, `gate` or `unknown`. It is what the worker's next tick will do
+  with the label, and it comes from the same function that words the worker's
+  `review:merge` gate copy (`trust.approvalConsequence`), so the two cannot
+  disagree. Any input that cannot be read gives `unknown`. The reads are
+  read-only, bounded, and taken after the one label write. The `reason` string
+  names the consequence and no longer says "this approval is NOT a merge".
+  Every other field and verb is unchanged, so the v2 wire shape is a superset
+  of v1. **Console follow-up:** verity-console's approve control and its
+  blast-radius confirm can read `effect.consequence` in place of the
+  hard-coded "does not merge at trust 0" copy, which is false from this
+  release (ADR-0037 Consequences).
+
+### Fixed
+
+- **A trust-0 approval now completes the merge (stage 111, dev#291, ADR-0014
+  amended 2026-09-27).** At `review.trust: 0` the `review:merge` gate told the
+  operator to apply `verity:approved`, but `trust.decideMerge` had no approval
+  input, so the label could never lead to a merge: the approval tick bought a
+  fresh review and gated again. `decideMerge` now takes an optional
+  `{ approved }` argument. At trust 0, an approved `approve` verdict with
+  verified-green checks merges; approved but not green gates with "the merge
+  waits for CI". Without the argument the trust-0 gate is byte-identical.
+  `escalate` never merges at any trust, and trust 1/2 are unchanged. The
+  worker merges only when the approval resumed the exact verdict the human
+  read, on an unchanged PR head, and pins the merge to that head
+  (`gh pr merge --match-head-commit`). A head that moved gets a fresh review
+  that gates again. The token is consumed by the merge. When CI is not green
+  the label stays, so the next tick merges once CI is green without a new
+  approval. A merge GitHub refuses ends the tick as `infra` and leaves the
+  label.
+- **Approving a `review:merge` gate no longer re-buys the same review (stage
+  111, dev#292).** A completed review's `review:merge` park now records the same
+  parked-result pointer as the `unknown-cost` park (run id, PR, head SHA).
+  Approving it on an unchanged head resumes the recorded verdict with zero new
+  model runs and a verified $0 ledger row. A moved head, an unreadable
+  pointer, a missing parked file or a parked result without a verdict falls
+  back loudly to a fresh review. A resumed `request_changes` re-gates at zero
+  cost. An `unknown-cost` approval still consents only to the cost, so merging
+  after it takes a second approval.
+- **The `review:merge` gate's `approve:` line is true for its configuration
+  (stage 111, dev#291).** It used to say "apply label `verity:approved`" even
+  where the label could not advance the item. Now `request_changes`,
+  `escalate`, a provider without merge authority, trust 1 and red CI each get
+  their own line (see the table in `docs/autonomy.md`). Other gates keep the
+  plain line. A park with no resumable pointer no longer promises "re-gates at
+  zero cost" for any verdict: it says an approval re-reviews at full price.
+- **The trust-0 approval merges only a head a review examined, on a label a
+  human applied after seeing the verdict (stage 111 review, dev PR 297).**
+  - A gate comment counts only if the worker's bot wrote it; with no known bot
+    identity no parked result is resumed. Each posted pointer is also recorded
+    on the worker host (`~/.verity/logs/<run>/park.json`: run id, PR, head,
+    gate, bot login; no secrets), and a pointer that does not match its record
+    (forged, edited, or written elsewhere) re-reviews instead of resuming.
+  - A review's pointer records the PR head read **before** the review ran; a
+    push that lands during the review makes the approval re-review.
+  - `verity:approved` merges only if its latest `labeled` event is newer than
+    the gate comment, applied by an account other than the bot, and (when
+    `humans:` is set) by a listed login. Otherwise the verdict re-gates at zero
+    cost and the label is consumed. An unreadable timeline also re-gates.
+  - An approved merge that cannot land (CI still red, or GitHub refuses) now
+    retries without posting new gate comments, and after 3 approval ticks parks
+    the item `verity:needs-human`.
+  - A review verdict that names a PR other than the one it was dispatched for
+    is never merged and parks no pointer.
+  - `trust.merge` throws on a head pin that is not a full SHA instead of
+    merging unpinned.
+  - `operator act approve` applies the same checks: a trail it cannot
+    authenticate against a local park record reports `unknown`; a label the
+    worker would not honour reports `gate`; trust 1/2 with an `approve`
+    verdict reports `unknown` (the ladder may merge; v2's `resume` means a
+    non-approve verdict re-gates). A resolver failure after the label write
+    reports `unknown` instead of failing the verb.
+  - A head that moved while the review ran now records **no** resumable
+    pointer. Before, the pointer kept the pre-review head, so a force-push back
+    to it let an approval merge a verdict that may have described the other
+    head.
+  - A resumed `approve` verdict (any trust) is honoured only if the PR's
+    timeline shows no push-type event (`head_ref_force_pushed`,
+    `head_ref_restored`, `head_ref_deleted`, `committed`, and
+    `base_ref_force_pushed` / `base_ref_changed` if served) at or after the
+    review's pre-dispatch head read. That read now asks for
+    `headRefOid,updatedAt`, and GitHub's `updatedAt` is stored in `park.json`
+    as `head_read_at`. The comparison uses only GitHub timestamps, so host
+    clock skew does not matter. A push found, or a record with no read time,
+    means a loud fresh review; an unreadable timeline re-gates at zero cost.
+    This closes an A→B→A push inside the review window. `operator act
+    approve` reports `re-review` in the same cases and `unknown` if it cannot
+    read the timeline.
+  - The timeline reader fails closed when its last allowed page (50 × 100
+    events) is full, instead of judging a truncated timeline.
+  - The retry bound counts per parked verdict: a new label no longer restarts
+    it, and a refused label's re-gate carries it forward. The
+    `verity:needs-human` park resets it.
+  - A review whose verdict names another PR has its findings comment posted on
+    the PR it was dispatched for, never on the named PR.
+- **A `gh` write that timed out is no longer retried (stage 112, dev#290).**
+  Since 1.6 every `gh` timeout was retried, including comment posts, creates
+  and merges that may already have reached GitHub. A run summary posted twice
+  counted as two runs, so after one real run the no-progress breaker refused
+  the role's next dispatch and escalated to `verity:needs-human`. An issue
+  create could be duplicated. A merge that landed and was then retried was
+  reported as a failed merge.
+  - `gh.run` takes `idempotent: false` for writes that cannot be repeated
+    safely: comments, lock and unlock lines, issue, PR and release creates,
+    `gh label create`, and merges. Such a write is still retried when the
+    request never reached GitHub (DNS failure, connection refused, network
+    unreachable, secondary rate limit). It is not retried after an ambiguous
+    failure: a timeout, `i/o timeout`, a connection reset, a TLS handshake
+    timeout or an HTTP 5xx. It throws a `GhError` with `ambiguous: true`.
+    Reads and label adds or removes keep the 1.6 retry behaviour.
+  - After an ambiguous failure, a merge re-reads `gh pr view`. If GitHub
+    reports the PR merged (at the pinned head, for a head-pinned merge), the
+    merge counts as done with `confirmed_by: 'pr-view'`; otherwise the
+    original error stands. The merge is never issued twice. A lock acquire
+    re-reads the lock trail and holds the lock if its own lock line landed. A
+    PR create adopts the PR the branch now has. An issue create fails that
+    stage's reconcile loudly and is never retried. The run summary and the
+    findings comment stay best effort.
+  - The no-progress breaker counts distinct runs (run id plus roles), so a
+    duplicated summary cannot trip it.
+  - `gh` failures are classified from `gh`'s stderr only, and an HTTP status
+    counts only in the forms `gh` prints. A comment body that quotes
+    `HTTP 502` or `dial tcp` no longer changes how a call is retried.
+- **A usage ledger that git cannot locate stops the run instead of reading as
+  empty (stage 112, dev#283).** Since 1.6 any failing
+  `git rev-parse --git-dir` fell back to the in-tree `.verity/usage.csv`. That
+  included a `safe.directory` "dubious ownership" refusal, a broken config and a
+  timeout. The process then read a stale or empty file while every other process
+  used the git-dir ledger, so the daily limits were under-enforced. The fallback
+  now applies only when git says the directory is not a git repository, or when
+  there is no `.git` above it. Any other git error throws `LedgerPathError`. The
+  worker then refuses the run before the daily-limit check and before any GitHub
+  call: exit 30 `ledger-path: cannot locate the usage ledger: …`. `verity usage`
+  (including `recover` and `untrack`) and `verity operator runs|run|usage` exit
+  non-zero with the same message.
+- **Smaller fixes from the stage 108 and 110 reviews (stage 112).**
+  - The redaction used for tick logs and operator output also removes
+    `sk-ant-` and `sk-proj-` provider keys. It reuses the promotion scanner's
+    `SECRET_PATTERNS`, so both use one pattern set. Agent transcripts under
+    `~/.verity/logs` are still written unredacted.
+  - A benchmark tick whose worker ignores SIGTERM is killed with SIGKILL
+    10 seconds after the deadline, instead of blocking the harness until it
+    exits.
+  - `verity usage recover` writes a temporary file and renames it into place.
+    It re-reads the ledger just before the rename, so a row a worker appends
+    during the recover is kept, and an interrupted recover leaves the previous
+    ledger intact.
+  - `verity usage untrack` also refuses during a cherry-pick or revert sequence
+    (`sequencer/`) and during a bisect (`BISECT_LOG`).
+  - Out-of-date comments and docs that still described a committed usage
+    ledger now describe the ledger as runtime state. The generated
+    `verity-worker.yml` changes only in its comments.
+    `contracts/operator-run.md` still describes the committed ledger. That
+    contract is frozen and is left to `/verity:architect`.
+
+### Merged commits (generated from Conventional Commits; `dev#NN` = dev-repo PR)
+
+#### Fixes
+- timeouts never duplicate a write; the usage ledger path fails closed (dev#300)
+
+#### Chores
+- record PROM-0005 — finalize v1.6.0 released (prod tag v1.6.0)
+- record PROM-0005 — propose v1.6.0 (prod PR 8)
+
+#### Other
+- [stage 111] Trust-0 approval completes the merge, parked review verdicts resume on approval, honest gate copy, depends_on in the work projection (dev#297)
+- contracts(operator-act v1): restore the frozen Status line edited in place by a590c62; record supersession by appendix only (PR dev#297 review F10)
+- adr(0037): Accepted — operator confirmation 2026-09-27; operator-act v2 published (a590c62); implemented by stage 111 (dev#295)
+- architect(ADR-0037): publish contracts/operator-act-v2 — the act seam does not define trust semantics (invariant 1 restated, optional effect.consequence); v1 additively marked superseded; operator-gate gains additive depends_on; stage 111 spec amended (PR dev#297 review blocker)
+- adr(0014): amendment accepted — operator confirmation 2026-09-27; implemented by stage 111 (dev#295)
+- plan(stages 111, 112): trust-0 approval completes the merge + parked review verdicts resume + honest gate copy + depends_on projection (111, dev#295, closes dev#291 dev#292 dev#293; ADR-0014 amended); timeouts never duplicate a write + fail-closed ledger path + folded nits (112, dev#296, dev#290 dev#283)
+
 ## 1.6.0
 
 ### Added

@@ -324,3 +324,48 @@ test('a token-shaped string in a stage title never survives into work output', (
     'the next.reason carries the redacted marker',
   );
 });
+
+// ---------------------------------------------------------------------------
+// (7) Stage 111 (#293, additive): every work item carries `depends_on` — the
+//     stage file's declared dependencies, parsed exactly as `verity state`
+//     derives `dependsOn` — `[]` for `none`. The item schema does not bump.
+// ---------------------------------------------------------------------------
+
+test('work: depends_on is present on EVERY item — [] for none, [3,4] parsed — schema unchanged', () => {
+  const cwd = fixtureCwd([
+    { n: 1, title: 'Core' },
+    { n: 2, title: 'Follow', dependsOn: [1] },
+    { n: 3, title: 'Three' },
+    { n: 4, title: 'Four' },
+    { n: 5, title: 'Joins', dependsOn: [3, 4] },
+  ]);
+  const items = operator.work(cwd, {
+    snapshot: { online: true, issues: [], prs: [], tags: [] },
+  });
+  assertEqual(items.length, 5, 'one item per stage');
+  for (const it of items) {
+    assert(Array.isArray(it.depends_on), `stage ${it.stage} carries a depends_on array`);
+    assertEqual(it.schema, 1, 'schema does not bump for an additive field');
+  }
+  const by = Object.fromEntries(items.map((it) => [it.stage, it.depends_on]));
+  assertEqual(JSON.stringify(by[1]), '[]', '`none` ⇒ []');
+  assertEqual(JSON.stringify(by[2]), '[1]', 'single dependency');
+  assertEqual(JSON.stringify(by[5]), '[3,4]', 'comma list parsed to numbers');
+  // The golden shape: the frozen v1 fields in order, then the additive field.
+  assertEqual(
+    JSON.stringify(Object.keys(items[0])),
+    JSON.stringify([
+      'schema',
+      'stage',
+      'title',
+      'type',
+      'status',
+      'bucket',
+      'issue',
+      'pull_request',
+      'next',
+      'depends_on',
+    ]),
+    'v1 work-item keys unchanged, depends_on appended',
+  );
+});

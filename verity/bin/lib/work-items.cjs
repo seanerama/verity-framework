@@ -45,13 +45,19 @@ function defaultGhList(cwd) {
 
 // Deterministic `gh issue create` from the stage.cjs payload — one `--label` per
 // label, exactly as the old inline plan-agent call and benchmark replay do.
+// Stage 112: `idempotent: false` — an issue create has no safe read-back key
+// (the list that could find it is search-indexed and lags), so a create that
+// failed ambiguously (timeout, reset, 5xx: it may have landed) is NEVER
+// retried: it fails this stage's create loudly (reconcile's `failed[]`, which
+// agent-exec prints). The next reconcile's list sees the issue if it landed —
+// one issue, never two.
 function defaultGhCreate(cwd, issue) {
   const args = ['issue', 'create', '--title', issue.title];
   for (const label of issue.labels) {
     args.push('--label', label);
   }
   args.push('--body', issue.body);
-  return gh.run(args, { cwd });
+  return gh.run(args, { cwd, idempotent: false });
 }
 
 function firstLine(err) {
@@ -135,7 +141,13 @@ function reconcileWorkItems(cwd, opts = {}) {
       created.push(issue.number);
       have.add(issue.number); // guard against two files claiming the same N
     } catch (err) {
-      failed.push({ number: issue.number, error: firstLine(err) });
+      failed.push({
+        number: issue.number,
+        error:
+          err?.ambiguous === true
+            ? `${firstLine(err)} — the issue may exist; not re-created (stage 112)`
+            : firstLine(err),
+      });
     }
   }
 
