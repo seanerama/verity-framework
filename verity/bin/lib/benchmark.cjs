@@ -254,7 +254,22 @@ const HARNESS_STEP_TIMEOUT_MS = 10 * 60_000;
 // every call is bounded (a caller's `timeout` wins over the default) and git
 // never prompts (GIT_TERMINAL_PROMPT=0 layered over whatever env the caller
 // passed — security invariant 1.6; a headless run cannot answer a prompt).
+//
+// Stage 112 (#290-3): a caller that passes `killGraceMs` (a worker tick) gets
+// ESCALATION — SIGTERM at `timeout`, then SIGKILL `killGraceMs` later if the
+// child ignored the TERM. spawnSync alone has one kill signal and then waits
+// for the child to exit however long that takes, so a worker that traps
+// SIGTERM used to block the harness indefinitely; see graceSpawn below.
+// Without `killGraceMs` the spawn is byte-identical to before.
 function defaultSpawn(cmd, args, options = {}) {
+  if (Number.isInteger(options.killGraceMs) && options.killGraceMs > 0) {
+    return graceSpawn(cmd, args, {
+      timeout: HARNESS_STEP_TIMEOUT_MS,
+      killSignal: 'SIGTERM',
+      ...options,
+      env: { ...(options.env || process.env), GIT_TERMINAL_PROMPT: '0' },
+    });
+  }
   return spawnSync(cmd, args, {
     stdio: 'pipe',
     timeout: HARNESS_STEP_TIMEOUT_MS,
@@ -262,6 +277,90 @@ function defaultSpawn(cmd, args, options = {}) {
     ...options,
     env: { ...(options.env || process.env), GIT_TERMINAL_PROMPT: '0' },
   });
+}
+
+// The supervisor graceSpawn runs (a node -e script, so the harness stays
+// synchronous): it spawns the real command with inherited stdout/stderr (the
+// outer spawnSync captures them unchanged), sends killSignal at `timeout` and
+// SIGKILL `grace` ms later, and reports how the child ended as JSON on fd 3.
+const GRACE_SUPERVISOR_SRC = `
+const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const spec = JSON.parse(process.argv[1]);
+const report = (o) => { try { fs.writeSync(3, JSON.stringify(o)); } catch {} };
+let timedOut = false;
+let escalated = false;
+const child = spawn(spec.cmd, spec.args, { stdio: ['ignore', 'inherit', 'inherit'] });
+const term = setTimeout(() => {
+  timedOut = true;
+  try { child.kill(spec.killSignal); } catch {}
+}, spec.timeout);
+const kill = setTimeout(() => {
+  escalated = true;
+  try { child.kill('SIGKILL'); } catch {}
+}, spec.timeout + spec.grace);
+child.on('error', (err) => {
+  clearTimeout(term); clearTimeout(kill);
+  report({ spawnError: { code: err.code || null, message: err.message } });
+  process.exit(0);
+});
+child.on('exit', (code, signal) => {
+  clearTimeout(term); clearTimeout(kill);
+  report({ code, signal, timedOut, escalated });
+  process.exit(0);
+});
+`;
+
+// Run cmd under the grace supervisor and shape the result like spawnSync's:
+// { status, signal, stdout, stderr, error, escalated }. A child stopped at its
+// deadline carries error.code 'ETIMEDOUT' (the stage-110 tick_timeout signal
+// runTick reads), whether the TERM or the SIGKILL ended it; `escalated` says a
+// SIGKILL was needed. The supervisor itself is bounded too (deadline + grace +
+// 10 s, then SIGKILL) so nothing here can hang the harness.
+function graceSpawn(cmd, args, options) {
+  const { timeout, killGraceMs, killSignal, ...rest } = options;
+  const spec = { cmd, args, timeout, grace: killGraceMs, killSignal: killSignal || 'SIGTERM' };
+  const sup = spawnSync(process.execPath, ['-e', GRACE_SUPERVISOR_SRC, JSON.stringify(spec)], {
+    ...rest,
+    stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+    timeout: timeout + killGraceMs + 10_000,
+    killSignal: 'SIGKILL',
+  });
+  let outcome = {};
+  try {
+    outcome = JSON.parse(String(sup.output?.[3] || '{}'));
+  } catch {
+    outcome = {};
+  }
+  const res = {
+    pid: sup.pid,
+    stdout: sup.stdout,
+    stderr: sup.stderr,
+    status: null,
+    signal: null,
+    error: null,
+    escalated: outcome.escalated === true,
+  };
+  if (outcome.spawnError) {
+    res.error = Object.assign(
+      new Error(`spawnSync ${cmd} ${outcome.spawnError.code || 'failed'}`),
+      {
+        code: outcome.spawnError.code,
+      },
+    );
+    return res;
+  }
+  if (sup.error || outcome.code === undefined) {
+    // The supervisor itself failed or was killed: the child's fate is unknown.
+    res.error = sup.error || new Error(`spawnSync ${cmd}: supervisor reported nothing`);
+    return res;
+  }
+  res.status = typeof outcome.code === 'number' ? outcome.code : null;
+  res.signal = outcome.signal || null;
+  if (outcome.timedOut === true) {
+    res.error = Object.assign(new Error(`spawnSync ${cmd} ETIMEDOUT`), { code: 'ETIMEDOUT' });
+  }
+  return res;
 }
 
 // A spawn result is a success iff the process launched and exited 0. A spawn
@@ -867,6 +966,9 @@ const OFFLINE_MAX_WAIT_MS = 5 * 60_000;
 // 1 MiB spawnSync buffer would KILL a chatty worker (ENOBUFS) now that the gh
 // retry log is on, so a tick gets a larger, still finite, one.
 const TICK_MAX_BUFFER = 64 * 1024 * 1024;
+// Stage 112 (#290-3): SIGTERM first, then SIGKILL this long after a tick's
+// deadline if the worker is still alive.
+const TICK_KILL_GRACE_MS = 10_000;
 
 // Stage 110: the harness-side deadline for ONE `verity-worker --once` tick,
 // aligned to the lock TTL (locks.cjs: expires = now + max_wall_clock_min ×
@@ -990,6 +1092,12 @@ function runTick(ctx, n) {
       Number.isInteger(ctx.tickTimeoutMs) && ctx.tickTimeoutMs > 0
         ? ctx.tickTimeoutMs
         : tickTimeoutMs(autonomy.DEFAULTS.limits.max_wall_clock_min),
+    // Stage 112 (#290-3): a worker that ignores the SIGTERM is SIGKILLed this
+    // long after it (defaultSpawn's escalation) — never waited out.
+    killGraceMs:
+      Number.isInteger(ctx.killGraceMs) && ctx.killGraceMs > 0
+        ? ctx.killGraceMs
+        : TICK_KILL_GRACE_MS,
   };
   const res = ctx.spawn('verity-worker', ['--repo', ctx.repo, '--once'], options);
   const t1 = now();
@@ -1893,6 +2001,10 @@ module.exports = {
   tickTimeoutMs,
   offlineBudgetMs,
   parseWorkerSummary,
+  // Stage 112: the harness spawn (with SIGTERM→SIGKILL escalation on a tick)
+  // and its grace, exported so the suite drives a REAL TERM-trapping child.
+  defaultSpawn,
+  TICK_KILL_GRACE_MS,
   OFFLINE_BUDGET_MS,
   OFFLINE_MAX_WAIT_MS,
 };

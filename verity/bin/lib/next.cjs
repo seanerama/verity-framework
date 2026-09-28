@@ -385,7 +385,16 @@ function decideStage(n, stage, labels, snapshot, opts) {
   } else if (stage.status === 'building') {
     reason = `PR #${stage.pr} for stage ${n} is open with CI not green`;
   }
-  return { schema: SCHEMA, action: 'work', role, args, gate: null, target, reason };
+  const decision = { schema: SCHEMA, action: 'work', role, args, gate: null, target, reason };
+  // Stage 111 (ADR-0014 amended, #291): the approval FACT travels on the
+  // decision it belongs to. A work decision reached THROUGH the label gate above
+  // (the stage's issue∪PR carries `verity:approved`) is the one a human just
+  // approved; the worker threads it into the trust-0 merge decision. Additive
+  // and present only when true, so every unapproved decision is byte-identical.
+  if (labels.has(APPROVED_LABEL)) {
+    decision.approved = true;
+  }
+  return decision;
 }
 
 function exitCodeFor(decision) {

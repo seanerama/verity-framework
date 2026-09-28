@@ -658,7 +658,21 @@ test('e2e stage 36: flag OFF (default) — an escalate verdict routes EXACTLY as
   assert(labels(state, 114).includes('verity:awaiting-approval'), 'plain gate on the PR');
   const summary = comments(state, 30).find((b) => b.startsWith('🤖'));
   assert(summary.includes('gated at review:merge'), 'gated like request_changes');
-  assert(!summary.includes('/verity:plan'), 'no next-role naming when the flag is off');
+  // Stage 111: the APPROVE line now tells the truth for an escalate verdict
+  // (approvalHint — "resolve via /verity:plan; approval does not merge") at
+  // every flag setting; the stage-36 dark launch governs the gate REASON and
+  // the needs-human park, which stay exactly as request_changes routes them.
+  const result = summary.split('\n').find((l) => l.startsWith('result:'));
+  assert(
+    !result.includes('/verity:plan'),
+    'no next-role naming in the reason when the flag is off',
+  );
+  assert(
+    summary.includes(
+      `approve: ${worker.approvalHint({ trust: 0, verdict: 'escalate', mergeAuthority: true })}`,
+    ),
+    'the approve line is the escalate hint (stage 111)',
+  );
 });
 
 test('e2e stage 36: request_changes is unchanged — gates, NO needs-human (flag ON or OFF)', () => {
@@ -958,7 +972,27 @@ test('e2e: review-approve at trust 0 NEVER merges — gates with zero classifica
   const trustCalls = readCalls(fx).filter(
     (c) => c[0] === 'pr' && ['diff', 'view', 'checks', 'merge'].includes(c[1]),
   );
-  assertEqual(trustCalls.length, 0, 'trust 0 does not even classify');
+  // Stage 111: trust 0 still never CLASSIFIES (no diff, no additions/deletions
+  // view) — but it reads green exactly as trust 2 does (the approval that
+  // completes the merge demands a verified green reading, and the gate copy
+  // must be true for it). The PR head is read twice: once BEFORE the review is
+  // dispatched (the head the verdict examines — stage 111 review F2, the
+  // pointer's anchor; round 3: with GitHub's `updatedAt` for that read, the
+  // time the approval tick's push check starts from) and once at the
+  // review:merge park (to detect a push that landed while the review ran).
+  assertEqual(
+    JSON.stringify(
+      trustCalls.map((c) =>
+        c.slice(0, 2).concat(c.includes('--json') ? [c[c.indexOf('--json') + 1]] : []),
+      ),
+    ),
+    JSON.stringify([
+      ['pr', 'view', 'headRefOid,updatedAt'],
+      ['pr', 'checks'],
+      ['pr', 'view', 'headRefOid'],
+    ]),
+    'trust 0 does not classify: two head reads + one green reading, nothing else',
+  );
   const state = ghState(fx);
   assert(labels(state, 114).includes('verity:awaiting-approval'), 'gated for a human (on the PR)');
   const gate = comments(state, 114).find((b) => b.startsWith('⏸️'));
@@ -3112,6 +3146,14 @@ const IDLE_PLAN = {
 
 test('stage 37 REGRESSION: a null-anchor stage build (success, est_usd null) that opened a PR announces the unknown-cost gate ON THAT PR, with the stage-31 parked pointer', () => {
   const gh = patchTargetedPosts();
+  // Stage 111 review F1: a pointer is posted only once its local park record
+  // is written BESIDE the parked result — so the run's log directory must
+  // exist (agent-exec creates it for a real dispatch). Isolated HOME: the
+  // record never lands in the operator's real ~/.verity/logs.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-stage37-home-'));
+  fs.mkdirSync(path.join(home, '.verity', 'logs', 'run-stage37'), { recursive: true });
+  const realHome = process.env.HOME;
+  process.env.HOME = home;
   try {
     const summary = runStage37(
       NULL_STAGE,
@@ -3133,8 +3175,13 @@ test('stage 37 REGRESSION: a null-anchor stage build (success, est_usd null) tha
       /parked: role `build` result of run `run-stage37` at PR #7 head [0-9a-f]{6,40} /.test(gate),
       `the stage-31 parked pointer targets PR #7, got: ${gate}`,
     );
+    const record = worker.readParkRecord('run-stage37');
+    assertEqual(record.gate, 'unknown-cost', 'the pointer was recorded locally first');
+    assertEqual(record.pr, 7, 'the record names the PR the pointer names');
   } finally {
+    process.env.HOME = realHome;
     gh.restore();
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 

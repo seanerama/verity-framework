@@ -6,7 +6,11 @@
 // the T05 result marker) and this module decides, with deterministic code and
 // `gh` ground truth, whether the worker may merge:
 //
-//   trust 0 → NEVER merge, even on an approve verdict — gate for a human.
+//   trust 0 → never merge AUTONOMOUSLY, even on an approve verdict — gate for
+//             a human. Stage 111 (ADR-0014 amended 2026-09-27): the human's
+//             single-use `verity:approved` token IS the trust-0 merge decision
+//             — with `opts.approved` true, an approve verdict and green checks
+//             merge; approved but not green gates (the merge waits for CI).
 //   trust 1 → merge only when approve AND classify() says low-risk:
 //             every changed file (gh pr diff --name-only) matches an
 //             allowed_paths glob, NO file matches a protected_paths glob
@@ -214,10 +218,20 @@ function classify(pr, policy, ghOpts = {}) {
 // Merge decision (§4.5 trust ladder) — pure, no I/O.
 // ---------------------------------------------------------------------------
 
-// decideMerge(verdict, trust, classification, checksGreen) → { merge, gate,
-// reason }. Fail-closed at every branch: only an explicit 'approve' verdict
-// can merge, trust 0 never merges, unknown trust levels gate.
-function decideMerge(verdict, trust, classification, green) {
+// decideMerge(verdict, trust, classification, checksGreen, { approved }) →
+// { merge, gate, reason }. Fail-closed at every branch: only an explicit
+// 'approve' verdict can merge, trust 0 merges only on a human's approval with
+// green checks, unknown trust levels gate.
+//
+// Stage 111 (ADR-0014 amended 2026-09-27, #291): `opts.approved` is the fact
+// that the worker consumed the single-use `verity:approved` token for THIS
+// verdict — the human merge decision a trust-0 gate asks for. It is read ONLY
+// at trust 0 and ONLY for an 'approve' verdict: it never rescues a non-approve
+// verdict (escalate stays unmergeable at every trust, stage 36), never lowers a
+// trust-1 risk refusal (#91's territory), and never replaces the green reading
+// (`green` must be exactly true). Absent/false ⇒ every branch is byte-identical
+// to before the argument existed.
+function decideMerge(verdict, trust, classification, green, { approved = false } = {}) {
   if (verdict !== 'approve') {
     // Stage 36: `escalate` is a first-class non-approve verdict — an
     // architectural / frozen-contract blocker, not a code-rework request. It
@@ -243,6 +257,20 @@ function decideMerge(verdict, trust, classification, green) {
     };
   }
   if (trust === 0) {
+    if (approved === true) {
+      if (green === true) {
+        return {
+          merge: true,
+          gate: false,
+          reason: 'trust 0: human approval (verity:approved) + approve verdict + checks green',
+        };
+      }
+      return {
+        merge: false,
+        gate: true,
+        reason: 'trust 0: approved, but checks are not green — the merge waits for CI',
+      };
+    }
     return {
       merge: false,
       gate: true,
@@ -265,6 +293,82 @@ function decideMerge(verdict, trust, classification, green) {
   return { merge: false, gate: true, reason: `unknown trust level ${trust} — failing closed` };
 }
 
+// ---------------------------------------------------------------------------
+// Approval consequence (contracts/operator-act-v2.md § Schema, ADR-0037) —
+// pure, no I/O.
+// ---------------------------------------------------------------------------
+
+// What the worker's NEXT tick does with a `verity:approved` token on a
+// completed review's review:merge park. The ONE decision behind both the
+// worker's gate copy (approvalHint) and `verity operator act approve`'s
+// `effect.consequence`, so the two can never disagree for the same inputs.
+//   trust          policy.review.trust
+//   verdict        the parked review verdict (lower-case), or null/'' for none
+//   mergeAuthority the review runtime's trust-table merge authority (ADR-0031)
+//   hasPr          the verdict names a PR (no PR ⇒ no pointer can exist)
+//   resumable      a resume of the parked verdict would succeed: a recorded
+//                  head SHA that still equals the PR's head, a readable
+//                  completed result carrying the verdict
+//   approverTrusted (optional, default true) the `verity:approved` label is a
+//                  valid trust-0 merge decision: applied AFTER the latest bot
+//                  gate comment, by an actor that is not the worker's bot and
+//                  (when `humans:` is configured) is listed there. Only the act
+//                  verb reads the label timeline; the gate copy (approvalHint)
+//                  speaks to a label not yet applied and leaves it true.
+// → 'merge-when-green' | 'resume' | 're-review' | 'gate' | 'unknown'.
+//
+// 'unknown' is returned for exactly one decided case (stage 111 review F5):
+// trust 1/2 + approve verdict + a resumable head. There the resumed verdict
+// re-enters the trust ladder, which MERGES it if the PR is low-risk / checks
+// are green — inputs this decision does not take. v2's `resume` means "a
+// parked NON-approve verdict re-gates at zero cost"; predicting it here would
+// promise no merge where a merge may happen (the unsafe direction for a
+// console), so the decision fails closed to 'unknown'. Every other input that
+// could not be READ is the caller's to report as 'unknown' (never a guess),
+// before this function is consulted.
+const APPROVAL_CONSEQUENCES = ['merge-when-green', 'resume', 're-review', 'gate', 'unknown'];
+
+function approvalConsequence({
+  trust,
+  verdict,
+  mergeAuthority,
+  hasPr = true,
+  resumable = true,
+  approverTrusted = true,
+}) {
+  if (mergeAuthority !== true) {
+    // A verdict from a runtime without merge authority never reaches merge —
+    // resumed or re-bought, the item gates again (ADR-0031).
+    return 'gate';
+  }
+  if (verdict === 'escalate') {
+    return 'gate'; // stage 36: never merges at any trust, with or without approval
+  }
+  if (typeof verdict !== 'string' || verdict === '' || hasPr !== true || resumable !== true) {
+    // No parked verdict to resume (none recorded, no PR to anchor it, a head
+    // that moved or was never recorded, the local substrate's missing trail):
+    // the approval buys a FRESH review at full price.
+    return 're-review';
+  }
+  if (verdict !== 'approve') {
+    return 'resume'; // the same non-approve verdict re-gates at zero cost
+  }
+  if (trust === 0) {
+    // The human's token IS the trust-0 merge decision — but only a token a
+    // human applied after the gate it answers (stage 111 review F3/F4). A
+    // label the worker will not honour resumes the verdict, re-gates it, and
+    // never merges: the token cannot advance the item.
+    return approverTrusted === false ? 'gate' : 'merge-when-green';
+  }
+  if (trust === 1 || trust === 2) {
+    // The ladder re-evaluates the SAME approve verdict at zero cost and MAY
+    // merge it (trust 1: low risk + green; trust 2: green) — inputs this
+    // decision does not read. Fail closed: never 'resume' (see above).
+    return 'unknown';
+  }
+  return 'gate'; // unknown trust level fails closed
+}
+
 // The ONE merge call in the autonomy codepath (§4.5): squash, via the gh layer.
 //
 // Stage 81 (ADR-0029 §3), the local-substrate path: the engine performs the
@@ -277,8 +381,35 @@ function decideMerge(verdict, trust, classification, green) {
 // on the one invariant no caller may relax: UNKNOWN never merges. decideMerge
 // remains the decision; this refusal only guards the act, with the same error
 // shape review.merge refuses with.
-function merge(pr, ghOpts = {}) {
+//
+// Stage 111: `opts.matchHead` (additive) pins the merge to the head SHA the
+// approved verdict examined — `gh pr merge --match-head-commit <sha>` makes
+// GitHub itself refuse the merge if the branch moved after the green reading,
+// so a human's trust-0 approval can never land a head nobody reviewed. Absent
+// ⇒ the argv is byte-identical to before (trust 1/2 never pass it). PRESENT
+// but not a full 40-hex SHA ⇒ throw before any gh call (stage 111 review F8):
+// a pin the caller asked for is never silently dropped into an unpinned merge.
+//
+// Stage 112: the gh merge is `idempotent: false` — an ambiguous failure is
+// never retried; it is resolved by confirmMerged below (a `gh pr view` re-read),
+// whose success result carries the additive `confirmed_by: 'pr-view'`.
+const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+
+function merge(pr, ghOpts = {}, opts = {}) {
+  const pinned = opts.matchHead !== undefined;
+  if (pinned && (typeof opts.matchHead !== 'string' || !FULL_SHA_RE.test(opts.matchHead))) {
+    throw new Error(
+      `refusing to merge PR #${pr}: matchHead ${JSON.stringify(opts.matchHead)} is not a full lower-case 40-hex commit SHA — a requested head pin is never dropped`,
+    );
+  }
   if (ghOpts.substrate === 'local') {
+    if (pinned) {
+      // The engine's local merge has no head-pin primitive; a pin is never
+      // silently dropped (no worker path pins on local — no pointer exists there).
+      throw new Error(
+        `refusing to merge PR #${pr}: a head-pinned merge is not supported on the local substrate`,
+      );
+    }
     if (!checksGreen(pr, ghOpts)) {
       const state = substrateLocal.localCiStateFor(ghOpts.cwd, pr);
       throw new Error(
@@ -290,11 +421,53 @@ function merge(pr, ghOpts = {}) {
     const done = substrateLocal.mergeLocalPr(ghOpts.cwd, pr);
     return { merged: true, pr, method: done.method };
   }
-  gh.run(['pr', 'merge', String(pr), '--squash'], ghOpts);
+  const argv = ['pr', 'merge', String(pr), '--squash'];
+  if (pinned) {
+    argv.push('--match-head-commit', opts.matchHead);
+  }
+  try {
+    // Stage 112: a merge is a non-idempotent write — never re-issued after an
+    // ambiguous failure (a timeout whose merge landed would be retried against
+    // a merged PR and reported as a failed merge).
+    gh.run(argv, { ...ghOpts, idempotent: false });
+  } catch (err) {
+    if (err?.ambiguous !== true) {
+      throw err;
+    }
+    return confirmMerged(pr, ghOpts, opts, err);
+  }
   return { merged: true, pr, method: 'squash' };
 }
 
+// Stage 112: read-after-ambiguous for the merge. The merge call failed in a way
+// that may have landed (timeout, connection reset, 5xx), so ask GitHub — one
+// idempotent, retried `gh pr view` — instead of guessing either way:
+//   - MERGED (and, for a pinned merge, at exactly the pinned head) → the merge
+//     happened: success, `confirmed_by: 'pr-view'`;
+//   - anything else, or the read itself failing → rethrow the ORIGINAL error.
+// Never a second merge call: a retry could merge a head nobody checked, and a
+// PR merged at a different head than the pin was not THIS merge.
+function confirmMerged(pr, ghOpts, opts, original) {
+  const pinned = opts.matchHead !== undefined;
+  const fields = pinned ? 'state,mergedAt,mergeCommit,headRefOid' : 'state,mergedAt,mergeCommit';
+  let view;
+  try {
+    view = gh.json(['pr', 'view', String(pr), '--json', fields], ghOpts);
+  } catch {
+    throw original;
+  }
+  if (view?.state !== 'MERGED') {
+    throw original;
+  }
+  if (pinned && view.headRefOid !== opts.matchHead) {
+    throw original;
+  }
+  return { merged: true, pr, method: 'squash', confirmed_by: 'pr-view' };
+}
+
 module.exports = {
+  APPROVAL_CONSEQUENCES,
+  approvalConsequence,
   globMatch,
   matchAny,
   checksGreen,

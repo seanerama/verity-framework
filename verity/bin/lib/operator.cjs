@@ -337,10 +337,13 @@ function computeRuntime(flags, policy, local) {
 //
 // Stage 85 (ADR-0029): on the LOCAL substrate the worker's §7 run-summary
 // route is the usage ledger (worker postComment has no local comment surface;
-// its structured facts land in `.verity/usage.csv` via recordUsage) — so
+// its structured facts land in the usage ledger — usage.ledgerPath, the
+// git-dir sidecar since stage 108 — via recordUsage) — so
 // `last_tick`/`last_outcome` RESOLVE from the ledger's newest folded run,
 // exactly the operator-run derivation (foldRun: the latest row carries the
-// run-level outcome). An empty/missing ledger stays honestly null. `lock`
+// run-level outcome). An empty/missing ledger stays honestly null, and so
+// (stage 112) does one whose location git could not resolve (LedgerPathError):
+// unobserved, never a fabricated value. `lock`
 // stays null WITH a reason: the local worker takes no lock at all (the §4.3
 // lock is a GitHub-comment protocol; contract local-work-item v1 carries no
 // comments), so there is no lock surface to read — never a fabricated
@@ -357,7 +360,15 @@ function computeWorker(cwd, local) {
   if (local !== true) {
     return base;
   }
-  const ledgerData = usage.readUsage(cwd);
+  let ledgerData;
+  try {
+    ledgerData = usage.readUsage(cwd);
+  } catch (err) {
+    if (err instanceof usage.LedgerPathError) {
+      return base;
+    }
+    throw err;
+  }
   if (!ledgerData.exists || ledgerData.rows.length === 0) {
     return base;
   }
@@ -537,6 +548,11 @@ function work(cwd, opts = {}) {
       issue: s.issue ?? null,
       pull_request: s.pr ?? null,
       next: projectNext(decision),
+      // Stage 111 (#293, additive — contracts/operator-gate.md v1, schema
+      // unchanged): the stage's declared dependencies, exactly as `verity
+      // state` derives `dependsOn` (ledger.parseStageFile: `**Depends on:**`,
+      // `none` ⇒ []). Present on EVERY item so a consumer can draw edges.
+      depends_on: Array.isArray(s.dependsOn) ? [...s.dependsOn] : [],
     });
   }
   return redactDeep(items);
@@ -739,8 +755,10 @@ function gates(cwd, opts = {}) {
 // --- Runs (contracts/operator-run.md, frozen v1, stage 49) -------------------
 // The read-only run-history seam behind the Console's Runs view. `runs` lists
 // recent worker runs (most-recent-first); `run <id>` returns one, or an honest
-// not-found. Both RECOMPOSE the local `.verity/usage.csv` ledger via
-// usage.readUsage and add no new state — no network, no writes.
+// not-found. Both RECOMPOSE the local usage ledger (usage.ledgerPath — the
+// git-dir sidecar since stage 108) via usage.readUsage and add no new state —
+// no network, no writes. Stage 112: a ledger git cannot locate
+// (LedgerPathError) is an error with a non-zero exit, never an empty list.
 
 // Fold the usage rows that share a run_id (a multi-role run spans one row per
 // role invocation) into ONE run descriptor. The `last` row (latest timestamp)
@@ -938,7 +956,8 @@ function policy(cwd, opts = {}) {
 // `unknown_cost_runs` (the count of runs whose cost could not be verified); the
 // unknown count is NEVER dropped or coerced into the sum. A missing ledger is
 // honest-zero, not a throw: summarizeUsage already zeroes an absent/empty
-// `.verity/usage.csv` (a genuinely bad --days still surfaces as a usage error).
+// ledger file (usage.ledgerPath) — but one git cannot LOCATE (LedgerPathError,
+// stage 112) throws, as does a genuinely bad --days.
 // `by_role` is null unless --by-role was passed.
 function usage_(cwd, opts = {}) {
   const s = usage.summarizeUsage(cwd, { days: opts.days ?? 7, byRole: !!opts.byRole });

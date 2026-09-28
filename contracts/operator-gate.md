@@ -114,3 +114,8 @@ Frozen at **v1**. Additive-only; a breaking change is a NEW contract, not an edi
 (framework-spec §4.3). Consumers: the Console's Approvals + Work views. The run
 history (`operator runs|run`) is a separate seam (`operator-run`, next stage); the
 write surface (`operator act`) is its own seam after that.
+
+Amended additively 2026-09-27 (stage 111): each `operator work` item MAY carry
+`depends_on: number[]` — the stage numbers this stage depends on, `[]` when the stage
+file records `none`. OPTIONAL: consumers tolerate its absence (a pre-111 engine omits
+it); `schema` stays `1`.

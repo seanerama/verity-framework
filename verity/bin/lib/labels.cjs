@@ -83,9 +83,13 @@ const LABELS = [
 ];
 
 // The ONLY gh entry point in this module — delegates to the shared layer,
-// which retries transient (5xx / secondary-rate-limit) failures.
+// which retries transient (5xx / secondary-rate-limit) failures. Stage 112:
+// `gh label create` is a write that cannot be re-issued blindly (a create that
+// landed and was retried fails `already_exists`), so it is `idempotent: false`
+// — no retry after an ambiguous failure; the next ensure sees the label and
+// leaves it alone. `list` and `edit` (same values again) stay idempotent.
 function ghLabel(args, cwd) {
-  return gh.run(['label', ...args], { cwd });
+  return gh.run(['label', ...args], { cwd, idempotent: args[0] !== 'create' });
 }
 
 function normColor(color) {

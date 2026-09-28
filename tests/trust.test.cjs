@@ -251,6 +251,79 @@ test('decideMerge: any non-approve verdict never merges, at every trust level', 
   }
 });
 
+// Stage 111 (ADR-0014 amended 2026-09-27, #291): the approval input.
+const TRUST0_GATE = {
+  merge: false,
+  gate: true,
+  reason: 'trust 0: autonomous merge is disabled — human merge required',
+};
+
+test('decideMerge stage 111: trust 0 × {approved, green} — (true,true) merges, (true,not-green) gates on CI, (false,*) byte-identical', () => {
+  assertEqual(
+    JSON.stringify(trust.decideMerge('approve', 0, null, true, { approved: true })),
+    JSON.stringify({
+      merge: true,
+      gate: false,
+      reason: 'trust 0: human approval (verity:approved) + approve verdict + checks green',
+    }),
+    '(approved, green) → merge',
+  );
+  for (const green of [false, null, undefined, 'true', 1]) {
+    assertEqual(
+      JSON.stringify(trust.decideMerge('approve', 0, null, green, { approved: true })),
+      JSON.stringify({
+        merge: false,
+        gate: true,
+        reason: 'trust 0: approved, but checks are not green — the merge waits for CI',
+      }),
+      `(approved, green=${JSON.stringify(green)}) → the CI gate; only exactly true is green`,
+    );
+  }
+  for (const green of [true, false, null]) {
+    for (const opts of [undefined, {}, { approved: false }, { approved: 'yes' }, { approved: 1 }]) {
+      const args = ['approve', 0, null, green];
+      if (opts !== undefined) {
+        args.push(opts);
+      }
+      assertEqual(
+        JSON.stringify(trust.decideMerge(...args)),
+        JSON.stringify(TRUST0_GATE),
+        `(approved=${JSON.stringify(opts)}, green=${green}) → today's trust-0 gate, byte-identical`,
+      );
+    }
+  }
+});
+
+test('decideMerge stage 111: escalate never merges even approved + green; approval never changes trust 1/2 or non-approve outputs', () => {
+  for (const trustLevel of [0, 1, 2]) {
+    const esc = trust.decideMerge('escalate', trustLevel, LOW, true, { approved: true });
+    assertEqual(esc.merge, false, `escalate at trust ${trustLevel}`);
+    assertEqual(esc.escalate, true, 'still tagged escalate');
+    for (const verdict of ['request_changes', 'reject', null]) {
+      assertEqual(
+        JSON.stringify(trust.decideMerge(verdict, trustLevel, LOW, true, { approved: true })),
+        JSON.stringify(trust.decideMerge(verdict, trustLevel, LOW, true)),
+        `verdict ${verdict} trust ${trustLevel}: approval changes nothing`,
+      );
+    }
+  }
+  for (const [t, cls, green] of [
+    [1, LOW, true],
+    [1, HIGH, true],
+    [1, null, true],
+    [2, null, true],
+    [2, null, false],
+    [2, null, null],
+    [3, LOW, true],
+  ]) {
+    assertEqual(
+      JSON.stringify(trust.decideMerge('approve', t, cls, green, { approved: true })),
+      JSON.stringify(trust.decideMerge('approve', t, cls, green)),
+      `trust ${t} (${cls?.risk}, green=${green}): output unchanged by approved:true`,
+    );
+  }
+});
+
 test('decideMerge: an out-of-range trust level fails closed', () => {
   const d = trust.decideMerge('approve', 3, LOW, true);
   assertEqual(d.merge, false);
@@ -294,6 +367,80 @@ test('merge: issues exactly `gh pr merge <n> --squash`', () => {
   assertEqual(JSON.stringify(calls), JSON.stringify([['pr', 'merge', '114', '--squash']]));
   assertEqual(r.merged, true);
   assertEqual(r.method, 'squash');
+});
+
+test('merge stage 111: matchHead pins `--match-head-commit <sha>`; a non-SHA pin THROWS before any gh call (review F8)', () => {
+  const sha = 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0';
+  const pinned = ghStub({ files: [], additions: 0, deletions: 0, checksPass: true });
+  trust.merge(114, pinned.ghOpts, { matchHead: sha });
+  assertEqual(
+    JSON.stringify(pinned.calls),
+    JSON.stringify([['pr', 'merge', '114', '--squash', '--match-head-commit', sha]]),
+  );
+  // Absent ⇒ the unpinned argv, byte-identical to before stage 111.
+  const plain = ghStub({ files: [], additions: 0, deletions: 0, checksPass: true });
+  trust.merge(114, plain.ghOpts);
+  trust.merge(114, plain.ghOpts, {});
+  assertEqual(
+    JSON.stringify(plain.calls),
+    JSON.stringify([
+      ['pr', 'merge', '114', '--squash'],
+      ['pr', 'merge', '114', '--squash'],
+    ]),
+  );
+  // A requested pin that is not a full SHA is never silently dropped into an
+  // unpinned merge (before the fix these merged UNPINNED).
+  for (const bad of ['unknown', '--admin', '', null, 42, 'a1b2c3d', sha.toUpperCase()]) {
+    const b = ghStub({ files: [], additions: 0, deletions: 0, checksPass: true });
+    let threw = null;
+    try {
+      trust.merge(114, b.ghOpts, { matchHead: bad });
+    } catch (err) {
+      threw = err;
+    }
+    assert(threw !== null, `matchHead ${JSON.stringify(bad)} throws`);
+    assert(/matchHead/.test(threw.message), `the refusal names the pin: ${threw.message}`);
+    assertEqual(b.calls.length, 0, `matchHead ${JSON.stringify(bad)}: no gh call at all`);
+  }
+  let local = null;
+  try {
+    trust.merge(114, { substrate: 'local', cwd: '/nonexistent' }, { matchHead: sha });
+  } catch (err) {
+    local = err;
+  }
+  assert(
+    local !== null && /local substrate/.test(local.message),
+    'a pin is never dropped on local',
+  );
+});
+
+test('approvalConsequence (review F5): trust 1/2 + approve + resumable head is unknown — never resume', () => {
+  for (const t of [1, 2]) {
+    assertEqual(
+      trust.approvalConsequence({ trust: t, verdict: 'approve', mergeAuthority: true }),
+      'unknown',
+      `trust ${t}: the ladder may merge the resumed verdict — fail closed`,
+    );
+    assertEqual(
+      trust.approvalConsequence({ trust: t, verdict: 'request_changes', mergeAuthority: true }),
+      'resume',
+      `trust ${t}: a non-approve verdict still re-gates at zero cost`,
+    );
+  }
+  assertEqual(
+    trust.approvalConsequence({ trust: 0, verdict: 'approve', mergeAuthority: true }),
+    'merge-when-green',
+  );
+  assertEqual(
+    trust.approvalConsequence({
+      trust: 0,
+      verdict: 'approve',
+      mergeAuthority: true,
+      approverTrusted: false,
+    }),
+    'gate',
+    'a label the worker will not honour never merges',
+  );
 });
 
 test('checksGreen: exit 0 → true; any gh failure → false (fail closed)', () => {

@@ -146,7 +146,7 @@ jobs:
         with:
           node-version: 20
       - run: npm i -g verity-framework@^1 @anthropic-ai/claude-code
-      # The worker's usage-ledger commit self-identifies (author verity-worker); no git config step needed.
+      # The usage ledger is runtime state under .git, never committed (stage 108); engine-owned commits self-identify (author verity-worker).
       - run: verity-worker --repo \${{ github.repository }} --once
         env:
           GH_TOKEN: \${{ secrets.VERITY_BOT_TOKEN }}

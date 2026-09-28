@@ -1,7 +1,8 @@
-// Operator ACT — `verity operator act <verb>` (stage 50, contracts/operator-act.md,
-// frozen v1). This is the operator seam's ONLY WRITE surface, kept in a SEPARATE
-// module so the projection (operator.cjs) stays pure-read; operator.cjs merely
-// DELEGATES the `act` verb here. Each verb is a thin, allowlisted wrapper over an
+// Operator ACT — `verity operator act <verb>` (stage 50; contracts/operator-act-v2.md,
+// frozen v2 — ADR-0037; v1 superseded, wire shape a superset). This is the
+// operator seam's ONLY WRITE surface, kept in a SEPARATE module so the
+// projection (operator.cjs) stays pure-read; operator.cjs merely DELEGATES the
+// `act` verb here. Each verb is a thin, allowlisted wrapper over an
 // action an operator can already perform by hand — a label POST/DELETE (the same
 // `gh api …/labels` primitive verity/worker/index.cjs addLabel/removeLabel uses)
 // or launching `verity-worker --once`. It adds convenience + a structured audit
@@ -10,8 +11,13 @@
 // Safety spine (contract §Invariants — the point of this stage):
 //   1. NO merge authority, EVER. No verb merges, closes a PR, or grants merge.
 //      `approve` only applies the single-use resume token the worker's trust
-//      ladder then EVALUATES (trust 0 still never merges — ADR-0013). There is no
-//      merge/`pr merge` argv anywhere in this module.
+//      ladder then EVALUATES (ADR-0013; since stage 111 / ADR-0014 amended, at
+//      trust 0 the WORKER merges on that token only for an approve verdict on
+//      an unchanged head with green CI — this module still never does). There
+//      is no merge/`pr merge` argv anywhere in this module. `approve` reports
+//      what the worker's next tick will do (`effect.consequence`, v2) from
+//      READ-ONLY reads taken after its one write — the prediction adds no
+//      write and no authority.
 //   2. Allowlist only. The verb set is exhaustive; an unknown verb is a hard
 //      error. No generic gh/label passthrough.
 //   3. Fail-closed. Any gh/worker failure ⇒ ok:false + a redacted reason + a
@@ -59,6 +65,11 @@ const VERBS = [
   'circuit',
   'run-once',
 ];
+
+// The gate-comment trail read's pagination — the worker's own comment reader's
+// bounds (locks.cjs PER_PAGE / MAX_PAGES).
+const TRAIL_PER_PAGE = 100;
+const TRAIL_MAX_PAGES = 50;
 
 const DEFAULT_REWORK_NOTE =
   'Changes requested — parked for rework (verity:needs-human). Address the review notes, then clear the label to resume.';
@@ -120,6 +131,7 @@ function opAddLabel(repo, n, label) {
     effect: { kind: 'label-add', label, item: n },
     argv: ['api', '-X', 'POST', `${apiBase(repo, n)}/labels`, '-f', `labels[]=${label}`],
     tolerate404: false,
+    idempotent: true, // stage 112: an already-present label is a 200 no-op — keeps retrying
   };
 }
 
@@ -141,6 +153,10 @@ function opComment(repo, n, body) {
     effect: { kind: 'comment', item: n, body },
     argv: ['api', '-X', 'POST', `${apiBase(repo, n)}/comments`, '-f', `body=${body}`],
     tolerate404: false,
+    // Stage 112: NOT idempotent — an ambiguous failure (timeout, reset, 5xx)
+    // is never retried (it could post the note twice); the verb reports it
+    // failed, never a false success (invariant 4).
+    idempotent: false,
   };
 }
 
@@ -179,7 +195,9 @@ function runOps(ops, run, ghOpts) {
       if (ghOpts.substrate === 'local') {
         performLocalOp(op, ghOpts.cwd || process.cwd());
       } else {
-        run(op.argv, ghOpts);
+        // Stage 112: a non-idempotent op says so; every other op's bag is
+        // byte-identical to before.
+        run(op.argv, op.idempotent === false ? { ...ghOpts, idempotent: false } : ghOpts);
       }
     } catch (err) {
       if (op.tolerate404 && err && err.reason === 'http-404') {
@@ -423,6 +441,322 @@ function runOnce(opts = {}) {
   });
 }
 
+// --- approve: effect.consequence (stage 111 amendment, ADR-0037) -----------
+//
+// contracts/operator-act-v2.md § Schema: `effect.consequence` on `approve` is
+// what the worker's NEXT tick does with the token, computed from the SAME
+// inputs as the worker's gate copy — and decided by the SAME pure function
+// (trust.approvalConsequence, which approvalHint words), so the act verb and
+// the gate comment never disagree. The inputs, each read-only and bounded
+// (gh.run's own per-call timeout; no write, no merge, no model):
+//   - the effective policy (review trust, the review gate's name, the review
+//     runtime's merge authority from the provider trust table, ADR-0031, and
+//     the `humans:` list);
+//   - the item's gate-comment trail → the LATEST gate pause the worker's BOT
+//     posted and its parked pointer (the worker's own parsers). Stage 111
+//     review F1: the act verb does not know the worker's bot login, so it
+//     learns it from the worker host's local park records
+//     (~/.verity/logs/<run>/park.json): the bot is the author of a gate
+//     comment whose pointer matches a record exactly and whose record names
+//     that author. A trail with no such comment (forged, edited, or read on a
+//     host without the records) authenticates nothing ⇒ 'unknown';
+//   - the parked review result's verdict (~/.verity/logs, the file the
+//     worker's resume re-reads) and the pointer's own park record;
+//   - the PR's current head vs the pointer's recorded head;
+//   - for an approve verdict (round 3, N1b), the PR's timeline: any push at
+//     or after the review's pre-dispatch head read (park record
+//     `head_read_at`) ⇒ the worker re-reviews ('re-review');
+//   - at trust 0 for an approve verdict, the item's label timeline (review
+//     F3/F4): the worker honours the label only when its latest `labeled`
+//     event is newer than that gate comment, by an actor that is not the bot
+//     (and is in `humans:` when set) — else the token cannot merge ('gate').
+// Any input that cannot be read ⇒ 'unknown' — never a guess. The checks
+// reading is deliberately NOT taken: no consequence value depends on it
+// (merge-when-green already means "merges once CI is green"), so reading it
+// would only add a way to be unknown.
+function errText(err) {
+  return firstLine(err?.message || String(err)) || 'no detail';
+}
+
+function unknownConsequence(detail) {
+  return { consequence: 'unknown', detail };
+}
+
+function readTrail(repo, target, run, cwd) {
+  const all = [];
+  for (let page = 1; page <= TRAIL_MAX_PAGES; page += 1) {
+    const raw = run(
+      ['api', `${apiBase(repo, target)}/comments?per_page=${TRAIL_PER_PAGE}&page=${page}`],
+      { cwd },
+    );
+    const batch = JSON.parse(raw);
+    if (!Array.isArray(batch)) {
+      throw new Error('the comment read returned no comment list');
+    }
+    all.push(...batch);
+    if (batch.length < TRAIL_PER_PAGE) {
+      break;
+    }
+  }
+  return all;
+}
+
+function readPrHead(repo, pr, run, cwd) {
+  const view = JSON.parse(run(['api', `repos/${repo}/pulls/${pr}`], { cwd }));
+  const sha = view?.head?.sha;
+  if (typeof sha !== 'string' || !/^[0-9a-fA-F]{6,40}$/.test(sha)) {
+    throw new Error('the PR read carried no head SHA');
+  }
+  return sha.toLowerCase();
+}
+
+// Stage 111 review F1: the worker bot's login, learned from the local park
+// records (see above), or null when no gate comment on the trail is
+// authenticated by one. Newest first; an unreadable record authenticates
+// nothing (skipped).
+function authenticatedBot(trail, worker, readRecord) {
+  for (let i = trail.length - 1; i >= 0; i -= 1) {
+    const c = trail[i];
+    const author = c?.user?.login;
+    if (
+      typeof c?.body !== 'string' ||
+      typeof author !== 'string' ||
+      author === '' ||
+      !c.body.startsWith(worker.GATE_COMMENT_PREFIX)
+    ) {
+      continue;
+    }
+    const { pointer } = worker.parseGatePause(c.body);
+    if (pointer === null) {
+      continue;
+    }
+    let rec;
+    try {
+      rec = readRecord(pointer.runId);
+    } catch {
+      continue;
+    }
+    if (rec !== null && worker.parkRecordMismatch(rec, pointer, author) === null) {
+      return rec.bot;
+    }
+  }
+  return null;
+}
+
+function approveConsequence(repo, target, opts) {
+  // Lazy: only this verb's prediction needs the worker's parsers/resolvers;
+  // every other verb's load path is unchanged.
+  const worker = require('../../worker/index.cjs');
+  const trust = require('./trust.cjs');
+  const tiers = require('./agents/tiers.cjs');
+  if (opts.substrate === 'local') {
+    return unknownConsequence(
+      'the local substrate has no comment trail to read a parked review verdict from (contract local-work-item v1)',
+    );
+  }
+  const cwd = opts.cwd || process.cwd();
+  const run = opts.run || gh.run;
+  const readRecord = opts.readParkRecord || worker.readParkRecord;
+  // Stage 111 review F9: every resolution that can throw sits inside the try,
+  // so a failure AFTER the label write reports `unknown`, never a failed verb.
+  let policy;
+  let trustLevel;
+  let reviewGate;
+  let provider;
+  let mergeAuthority;
+  try {
+    policy = opts.policy || require('./autonomy.cjs').loadPolicy(cwd);
+    trustLevel = policy?.review?.trust;
+    reviewGate = worker.gateNameFor('review', policy);
+    provider = worker.resolveEffectiveAgent(policy).agentForRole('review').provider;
+    const entry = tiers.getTier(provider);
+    mergeAuthority = entry !== null && entry.merge_authority === true;
+  } catch (err) {
+    return unknownConsequence(
+      `the autonomy policy could not be read or resolved (${errText(err)})`,
+    );
+  }
+
+  let trail;
+  try {
+    trail = readTrail(repo, target, run, cwd);
+  } catch (err) {
+    return unknownConsequence(
+      `#${target}'s gate-comment trail could not be read (${errText(err)})`,
+    );
+  }
+  const anyPause = trail.some(
+    (c) => typeof c?.body === 'string' && c.body.startsWith(worker.GATE_COMMENT_PREFIX),
+  );
+  if (!anyPause) {
+    return unknownConsequence(`#${target} carries no gate pause to evaluate this approval against`);
+  }
+  const bot = authenticatedBot(trail, worker, readRecord);
+  if (bot === null) {
+    return unknownConsequence(
+      `no gate comment on #${target} is authenticated by a local park record on this host — the worker's bot identity cannot be established here, and a gate comment is never trusted by its text (stage 111)`,
+    );
+  }
+  const pause = worker.latestGatePause(trail, bot);
+  if (pause === null) {
+    return unknownConsequence(
+      `#${target} carries no gate pause by ${bot} to evaluate this approval against`,
+    );
+  }
+  if (pause.gate !== reviewGate || (pause.pointer !== null && pause.pointer.role !== 'review')) {
+    return unknownConsequence(
+      `#${target}'s latest gate is \`${pause.gate ?? '(unnamed)'}\`, not a completed review's ${reviewGate} park — the engine predicts only the review merge decision`,
+    );
+  }
+  const decide = (inputs, detail) => ({
+    consequence: trust.approvalConsequence({ trust: trustLevel, mergeAuthority, ...inputs }),
+    detail,
+  });
+  if (!mergeAuthority) {
+    return decide(
+      { verdict: null, resumable: false },
+      `the review runtime '${provider}' has no merge authority (ADR-0031) — a verdict from it never merges`,
+    );
+  }
+  const pointer = pause.pointer;
+  if (pointer === null) {
+    return decide(
+      { verdict: null, resumable: false },
+      `the ${reviewGate} pause on #${target} recorded no parked review verdict — the approval buys a fresh review`,
+    );
+  }
+
+  let record;
+  try {
+    record = readRecord(pointer.runId);
+  } catch (err) {
+    return unknownConsequence(
+      `the local park record of run ${pointer.runId} could not be read (${errText(err)})`,
+    );
+  }
+  if (record === null) {
+    return unknownConsequence(
+      `the local park record of run ${pointer.runId} is not on this host (~/.verity/logs) — the pointer cannot be verified here`,
+    );
+  }
+  const mismatch = worker.parkRecordMismatch(record, pointer, bot);
+  if (mismatch !== null) {
+    return decide(
+      { verdict: null, resumable: false },
+      `the ${reviewGate} pointer on #${target} is not honoured (${mismatch}) — the approval buys a fresh review`,
+    );
+  }
+
+  let parked;
+  try {
+    const read = opts.readParkedResult || require('./agent-exec.cjs').readParkedResult;
+    parked = read({ 'run-id': pointer.runId, role: pointer.role, agent: provider });
+  } catch (err) {
+    return unknownConsequence(
+      `the parked review result of run ${pointer.runId} could not be read (${errText(err)})`,
+    );
+  }
+  if (parked === null || parked === undefined) {
+    return unknownConsequence(
+      `the parked review result of run ${pointer.runId} is not on this host (~/.verity/logs) — its verdict cannot be read here`,
+    );
+  }
+  const verdict =
+    parked.outcome === 'success' && typeof parked.artifacts?.verdict === 'string'
+      ? parked.artifacts.verdict.toLowerCase()
+      : null;
+  if (verdict === null || verdict === '') {
+    return decide(
+      { verdict: null, resumable: false },
+      `the parked review result of run ${pointer.runId} carries no completed verdict — the approval buys a fresh review`,
+    );
+  }
+  if (!/^[0-9a-f]{6,40}$/.test(pointer.head)) {
+    return decide(
+      { verdict, resumable: false },
+      `the parked '${verdict}' verdict recorded no verifiable head at park time`,
+    );
+  }
+  let head;
+  try {
+    head = readPrHead(repo, pointer.pr, run, cwd);
+  } catch (err) {
+    return unknownConsequence(
+      `PR #${pointer.pr}'s current head could not be read (${errText(err)})`,
+    );
+  }
+  if (head !== pointer.head) {
+    return decide(
+      { verdict, resumable: false },
+      `PR #${pointer.pr}'s head moved since the '${verdict}' verdict parked (${pointer.head} → ${head})`,
+    );
+  }
+  // Stage 111 review round 3 (N1b): the worker honours a parked APPROVE
+  // verdict only when the MERGE TARGET's timeline (PR #pointer.pr) shows no
+  // push since the review's pre-dispatch head read (worker.pushesSince, the
+  // same pure judgement). A push, or a record with no read time, makes the
+  // worker refuse the resume and buy a fresh review ⇒ 're-review'; a timeline
+  // that cannot be read here ⇒ 'unknown'.
+  let prEvents = null;
+  if (verdict === 'approve') {
+    const since = record.head_read_at;
+    if (typeof since !== 'string' || !Number.isFinite(Date.parse(since))) {
+      return decide(
+        { verdict, resumable: false },
+        `the parked '${verdict}' verdict's park record carries no time for the review's pre-dispatch head read — a later push cannot be ruled out, so the worker re-reviews`,
+      );
+    }
+    try {
+      prEvents = worker.readTimeline(repo, pointer.pr, (args) => JSON.parse(run(args, { cwd })));
+    } catch (err) {
+      return unknownConsequence(
+        `PR #${pointer.pr}'s timeline could not be read to rule out a push after the review's head read (${errText(err)})`,
+      );
+    }
+    const pushes = worker.pushesSince(prEvents, { since, head: pointer.head });
+    if (!pushes.ok) {
+      return decide(
+        { verdict, resumable: false },
+        `PR #${pointer.pr} was pushed to after the review read its head (${pushes.reason}) — the parked '${verdict}' verdict may describe another head, so the worker re-reviews`,
+      );
+    }
+  }
+  // Stage 111 review F3/F4: at trust 0 the label IS the merge decision, so
+  // predict exactly what the worker will judge from the same timeline (the
+  // item's; read once when the item is the PR itself).
+  let approverTrusted = true;
+  let approverNote = '';
+  if (trustLevel === 0 && verdict === 'approve') {
+    let events = pointer.pr === Number(target) ? prEvents : null;
+    if (events === null) {
+      try {
+        events = worker.readTimeline(repo, target, (args) => JSON.parse(run(args, { cwd })));
+      } catch (err) {
+        return unknownConsequence(
+          `#${target}'s label timeline could not be read (${errText(err)})`,
+        );
+      }
+    }
+    const judged = worker.judgeApprovalEvent(events, {
+      gateAt: pause.createdAt,
+      botLogin: bot,
+      humans: policy.humans,
+    });
+    approverTrusted = judged.ok;
+    if (!judged.ok) {
+      approverNote = ` — but the worker will not honour this label as the merge decision: ${judged.reason}; it re-gates the verdict at zero cost instead`;
+    }
+  }
+  return decide(
+    { verdict, resumable: true, approverTrusted },
+    `parked '${verdict}' verdict on PR #${pointer.pr}'s unchanged head ${head}, review trust ${trustLevel}${
+      trustLevel === 1 || trustLevel === 2
+        ? ' — the ladder re-evaluates it (risk / checks, which this verb does not read) and may merge'
+        : ''
+    }${approverNote}`,
+  );
+}
+
 // Perform one allowlisted verb. `args` are the tokens AFTER the verb (for
 // `circuit` that is [sub, target]; otherwise [target]). `opts`: { repo, cwd, run,
 // spawn, note } — `run`/`spawn` are the injection seams (default to gh.run /
@@ -545,10 +879,23 @@ function act(verb, args, opts = {}) {
   }
 
   if (verb === 'approve') {
-    return performLabelOps('approve', target, [opAddLabel(repo, target, APPROVED)], acting, {
+    const out = performLabelOps('approve', target, [opAddLabel(repo, target, APPROVED)], acting, {
       singular: true,
-      okReason: `applied ${APPROVED} to #${target} — the worker's trust ladder decides merge; this approval is NOT a merge`,
+      okReason: `applied ${APPROVED} to #${target}`,
     });
+    if (!out.ok) {
+      return out; // the token was not applied — nothing to predict (reason unchanged)
+    }
+    // Stage 111 amendment (ADR-0037, contracts/operator-act-v2.md § Schema):
+    // report what the worker's NEXT tick does with the token. Read-only, and
+    // only AFTER the one write succeeded — this verb still performs exactly
+    // one write and never merges (v2 invariant 1).
+    const { consequence, detail } = approveConsequence(repo, target, acting);
+    out.effect.consequence = consequence;
+    // (Never the word "token" here: ledger.redact treats `token …` as a
+    // credential line and would redact the rest of the reason.)
+    out.reason = `applied ${APPROVED} to #${target} — the worker's trust ladder decides what this approval does on its next tick (consequence: ${consequence} — ${detail})`;
+    return redactDeep(out);
   }
 
   if (verb === 'reject') {

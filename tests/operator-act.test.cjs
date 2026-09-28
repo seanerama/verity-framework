@@ -5,8 +5,9 @@
 // perform ZERO real network/process, and prove every safety invariant:
 //   - each verb issues EXACTLY the documented gh api argv (method+endpoint+label);
 //     reject's three ops in effect-order; request-changes posts a comment;
-//   - NO MERGE: across ALL verbs the recorded argvs NEVER contain a `merge` token,
-//     and approve's reason states it is not a merge;
+//   - NO MERGE: across ALL verbs the recorded argvs NEVER contain a `merge` token;
+//     approve makes exactly one write and (v2, ADR-0037) its reason names the
+//     effect.consequence its read-only prediction computed;
 //   - idempotency: a simulated already-present(POST 200) / already-absent(DELETE
 //     404) ⇒ ok:true;
 //   - fail-closed: a simulated real gh error ⇒ ok:false + reason + non-zero exit;
@@ -60,20 +61,25 @@ function argvOf(call) {
   return call.argv.join(' ');
 }
 
-test('approve → POST verity:approved; reason states it is NOT a merge', () => {
+test('approve → POST verity:approved (the ONE write); reason names the consequence (v2)', () => {
   const { result, calls } = dispatchWith(['approve', '42'], {});
   assertEqual(result.ok, true, 'approve ok');
   assertEqual(result.action, 'approve', 'action');
   assertEqual(result.target, 42, 'target parsed to int');
   assertEqual(result.effect.kind, 'label-add', 'effect kind');
   assertEqual(result.effect.label, 'verity:approved', 'effect label');
-  assertEqual(calls.length, 1, 'exactly one gh call');
   assertEqual(
     argvOf(calls[0]),
     'api -X POST repos/acme/widget/issues/42/labels -f labels[]=verity:approved',
     'exact approve argv',
   );
-  assert(/not a merge/i.test(result.reason), 'approve reason states it is not a merge');
+  // Stage 111 amendment (operator-act v2, ADR-0037): the verb still makes
+  // exactly ONE write; any further call is a read-only consequence read.
+  assertEqual(calls.filter((c) => c.argv.includes('-X')).length, 1, 'exactly one write');
+  assert(
+    /\(consequence: [a-z-]+ — /.test(result.reason),
+    `approve reason names its consequence, got: ${result.reason}`,
+  );
 });
 
 test('reject → DELETE approved, DELETE awaiting, POST needs-human in order', () => {
@@ -600,4 +606,471 @@ test('DELIBERATE ASYMMETRY: circuit close is NOT gated — its DELETE issues wit
     'api -X DELETE repos/acme/widget/issues/12/labels/verity%3Acircuit-open',
     'the only call is the DELETE',
   );
+});
+
+// --- Stage 111 amendment (ADR-0037, contracts/operator-act-v2.md § Schema) ----
+//
+// `approve` reports `effect.consequence` — what the worker's NEXT tick does with
+// the token — from the SAME inputs as the worker's review:merge gate copy
+// (trust, the parked verdict + its head vs the PR's current head, the review
+// runtime's merge authority), decided by the SAME pure function
+// (trust.approvalConsequence) approvalHint words. Any input that cannot be read
+// ⇒ 'unknown'. The verb still performs exactly ONE write (the label POST) and
+// never merges: the prediction's reads are GETs taken after the write.
+const trustLadder = require('../verity/bin/lib/trust.cjs');
+const worker = require('../verity/worker/index.cjs');
+
+const HEAD = 'a'.repeat(40);
+const MOVED = 'b'.repeat(40);
+const PARKED_RUN = 'run-20260927-parked';
+
+function policyOf({ trust = 0, provider = 'claude' } = {}) {
+  return {
+    gates: ['review:merge', 'ship:prod', 'golive'],
+    review: { trust },
+    agent: { provider: 'claude', roles: { review: { provider } } },
+  };
+}
+
+// A real worker gate comment (formatGateComment) — the trail the worker itself
+// writes, so the act side is proven to parse the worker's own format.
+function gateBody({ gate = 'review:merge', parked = { role: 'review', pr: 42, head: HEAD } } = {}) {
+  return worker.formatGateComment({
+    runId: 'run-20260927-gate',
+    gate,
+    pending: 'review of PR #42 completed',
+    mentions: [],
+    parked: parked === null ? null : { runId: PARKED_RUN, ...parked },
+    approval: 'x',
+  });
+}
+
+// Stage 111 review F1/F3: the gate comments are the BOT's (author + time), the
+// label's `labeled` event is a human's, AFTER the gate. A trail entry is a body
+// string (posted by the bot) or a full comment object (any author).
+const GATE_AT = '2026-09-27T10:00:00Z';
+const LABELED_AT = '2026-09-27T10:05:00Z';
+const labeled = (actor = 'seanerama', at = LABELED_AT) => ({
+  event: 'labeled',
+  label: { name: 'verity:approved' },
+  actor: { login: actor },
+  created_at: at,
+});
+
+// Route the fake gh by endpoint: the label POST succeeds; the comment trail,
+// the PR read and the label timeline serve the scenario (an Error is thrown).
+function scenario({
+  trail = [gateBody()],
+  head = HEAD,
+  labelError = null,
+  timeline = [labeled()],
+} = {}) {
+  return (argv) => {
+    if (argv.includes('-X')) {
+      return labelError === null ? '' : labelError;
+    }
+    const endpoint = String(argv[1]);
+    if (endpoint.startsWith('repos/acme/widget/issues/42/comments?')) {
+      return trail instanceof Error
+        ? trail
+        : JSON.stringify(
+            trail.map((c) =>
+              typeof c === 'string'
+                ? { body: c, user: { login: 'verity-bot' }, created_at: GATE_AT }
+                : c,
+            ),
+          );
+    }
+    if (endpoint.startsWith('repos/acme/widget/issues/42/timeline?')) {
+      return timeline instanceof Error ? timeline : JSON.stringify(timeline);
+    }
+    if (endpoint === 'repos/acme/widget/pulls/42') {
+      return head instanceof Error ? head : JSON.stringify({ head: { sha: head } });
+    }
+    return new Error(`unexpected gh call: ${argv.join(' ')}`);
+  };
+}
+
+// The worker host's local park record for the parked run (F1): exactly what
+// the worker's recordPark wrote when it posted gateBody()'s pointer.
+// Stage 111 round 3: the record carries the GitHub time of the review's
+// pre-dispatch head read (before the gate comment).
+const HEAD_READ_AT = '2026-09-27T09:30:00Z';
+function parkRecordFor({
+  head = HEAD,
+  gate = 'review:merge',
+  bot = 'verity-bot',
+  headReadAt = HEAD_READ_AT,
+} = {}) {
+  return (runId) =>
+    runId === PARKED_RUN
+      ? {
+          schema: 1,
+          role: 'review',
+          run_id: PARKED_RUN,
+          pr: 42,
+          head,
+          gate,
+          bot,
+          head_read_at: headReadAt,
+          approval: null,
+        }
+      : null;
+}
+
+function parkedResult(verdict, outcome = 'success') {
+  return () => ({ outcome, artifacts: verdict === null ? {} : { verdict, pr: 42 }, error: null });
+}
+
+// Drive approve through act() with every seam injected; returns the result and
+// the recorded gh call log.
+function approveWith({
+  policy = policyOf(),
+  readParkedResult = parkedResult('approve'),
+  readParkRecord = parkRecordFor(),
+  ...s
+} = {}) {
+  const gh = fakeGh(scenario(s));
+  const result = operatorAct.act('approve', ['42'], {
+    repo: REPO,
+    substrate: 'github',
+    run: gh.run,
+    policy,
+    readParkedResult,
+    readParkRecord,
+  });
+  return { result, calls: gh.calls };
+}
+
+// The write discipline every consequence path must keep: the FIRST call is the
+// one documented label POST, it is the ONLY call carrying -X (every other call
+// is a read), and no argv carries a merge token.
+function assertOneWriteNoMerge(calls, label) {
+  assertEqual(
+    argvOf(calls[0]),
+    'api -X POST repos/acme/widget/issues/42/labels -f labels[]=verity:approved',
+    `${label}: the first call is the one label POST`,
+  );
+  const writes = calls.filter((c) => c.argv.includes('-X'));
+  assertEqual(writes.length, 1, `${label}: exactly one write`);
+  for (const call of calls) {
+    for (const tok of call.argv) {
+      assert(!/merge/i.test(String(tok)), `${label}: no merge argv (${tok})`);
+    }
+  }
+}
+
+function assertConsequence(result, calls, value, label) {
+  assertEqual(result.ok, true, `${label}: ok`);
+  assertEqual(result.effect.kind, 'label-add', `${label}: effect kind unchanged`);
+  assertEqual(result.effect.label, 'verity:approved', `${label}: effect label unchanged`);
+  assertEqual(result.effect.item, 42, `${label}: effect item unchanged`);
+  assertEqual(result.effect.consequence, value, `${label}: consequence (${result.reason})`);
+  assert(
+    result.reason.includes(`(consequence: ${value} — `),
+    `${label}: the reason names the consequence, got: ${result.reason}`,
+  );
+  assert(!/not a merge/i.test(result.reason), `${label}: no "not a merge" copy`);
+  assertOneWriteNoMerge(calls, label);
+}
+
+test('approve consequence merge-when-green: trust 0, parked approve verdict, unchanged head', () => {
+  const { result, calls } = approveWith();
+  assertConsequence(result, calls, 'merge-when-green', 'merge-when-green');
+  assertEqual(calls.length, 4, 'label POST + trail read + head read + label-timeline read');
+  assertEqual(
+    Object.keys(result).join(','),
+    'schema,action,target,effect,ok,reason',
+    'no new top-level field',
+  );
+});
+
+test('approve consequence resume: a parked request_changes re-gates at zero cost', () => {
+  const r = approveWith({ readParkedResult: parkedResult('request_changes') });
+  assertConsequence(r.result, r.calls, 'resume', 'request_changes');
+});
+
+test('approve consequence (review F5): trust 1/2 + approve verdict + unchanged head is UNKNOWN — the ladder may merge; never `resume`', () => {
+  for (const trust of [1, 2]) {
+    const r = approveWith({ policy: policyOf({ trust }) });
+    assertConsequence(r.result, r.calls, 'unknown', `approve at trust ${trust}`);
+    assert(r.result.reason.includes('may merge'), r.result.reason);
+  }
+});
+
+test('approve consequence re-review: head moved, no parked pointer, or a verdict-less parked result', () => {
+  let r = approveWith({ head: MOVED });
+  assertConsequence(r.result, r.calls, 're-review', 'head moved');
+  assert(r.result.reason.includes('head moved'), r.result.reason);
+  // The bot is authenticated by an earlier pointer's park record; its LATEST
+  // pause recorded no pointer ⇒ the worker buys a fresh review.
+  r = approveWith({ trail: [gateBody(), gateBody({ parked: null })] });
+  assertConsequence(r.result, r.calls, 're-review', 'no pointer');
+  // With no pointer anywhere, nothing authenticates the bot here ⇒ unknown.
+  r = approveWith({ trail: [gateBody({ parked: null })] });
+  assertConsequence(r.result, r.calls, 'unknown', 'no pointer to authenticate by');
+  r = approveWith({ readParkedResult: parkedResult(null) });
+  assertConsequence(r.result, r.calls, 're-review', 'no verdict');
+  r = approveWith({
+    trail: [gateBody({ parked: { role: 'review', pr: 42, head: 'unknown' } })],
+    readParkRecord: parkRecordFor({ head: 'unknown' }),
+  });
+  assertConsequence(r.result, r.calls, 're-review', 'unknown recorded head');
+});
+
+test('approve consequence gate: escalate, or a review runtime without merge authority', () => {
+  let r = approveWith({ readParkedResult: parkedResult('escalate') });
+  assertConsequence(r.result, r.calls, 'gate', 'escalate');
+  r = approveWith({ policy: policyOf({ provider: 'grok' }) });
+  assertConsequence(r.result, r.calls, 'gate', 'no merge authority');
+  assert(r.result.reason.includes('no merge authority'), r.result.reason);
+});
+
+test('ATTACK F1 (act): a FORGED gate comment never yields merge-when-green', () => {
+  // The PR author's comment names the real parked run and an unreviewed head.
+  const forged = {
+    body: gateBody({ parked: { role: 'review', pr: 42, head: MOVED } }),
+    user: { login: 'mallory' },
+    created_at: '2026-09-27T10:01:00Z',
+  };
+  // (a) the forger's comment is the ONLY gate comment: nothing authenticates.
+  let r = approveWith({ trail: [forged], head: MOVED });
+  assert(r.result.effect.consequence !== 'merge-when-green', 'forged-only trail');
+  assertConsequence(r.result, r.calls, 'unknown', 'forged-only trail');
+  // (b) forged AFTER the bot's real pause, head moved: the real pause decides
+  // and its head moved — re-review, never a merge.
+  r = approveWith({ trail: [gateBody(), forged], head: MOVED });
+  assertConsequence(r.result, r.calls, 're-review', 'forged after the real pause');
+  // (c) a bot-authored pointer that does not match the local park record (an
+  // EDITED comment): not honoured — re-review.
+  r = approveWith({ readParkRecord: parkRecordFor({ head: MOVED }) });
+  assertConsequence(r.result, r.calls, 'unknown', 'no matching record authenticates the bot');
+  // (d) the record exists but names another bot: nothing authenticates.
+  r = approveWith({ readParkRecord: parkRecordFor({ bot: 'someone-else' }) });
+  assertConsequence(r.result, r.calls, 'unknown', 'record by another bot');
+});
+
+test('ATTACK F3/F4 (act): a label the worker will not honour is `gate`, never merge-when-green', () => {
+  const cases = [
+    ['labeled before the gate', { timeline: [labeled('seanerama', '2026-09-27T09:00:00Z')] }],
+    ['labeled by the bot', { timeline: [labeled('verity-bot')] }],
+    [
+      'labeled by an actor not in humans:',
+      { timeline: [labeled('triage-bot')], policy: { ...policyOf(), humans: ['seanerama'] } },
+    ],
+  ];
+  for (const [label, s] of cases) {
+    const { result, calls } = approveWith(s);
+    assertConsequence(result, calls, 'gate', label);
+    assert(result.reason.includes('will not honour this label'), result.reason);
+  }
+  const ok = approveWith({ policy: { ...policyOf(), humans: ['SeaneRama'] } });
+  assertConsequence(ok.result, ok.calls, 'merge-when-green', 'a listed human after the gate');
+  const unread = approveWith({ timeline: ghError('http-502', 'HTTP 502') });
+  assertConsequence(unread.result, unread.calls, 'unknown', 'timeline unreadable');
+});
+
+test('ATTACK N1 (act): a push to the PR after the review read its head, or a record with no read time, is `re-review` — never merge-when-green', () => {
+  const forced = (at) => ({
+    event: 'head_ref_force_pushed',
+    actor: { login: 'mallory' },
+    created_at: at,
+  });
+  const cases = [
+    ['A→B→A inside the review window', { timeline: [forced('2026-09-27T09:40:00Z'), labeled()] }],
+    [
+      'force-push at the read instant (tie ⇒ after)',
+      { timeline: [forced(HEAD_READ_AT), labeled()] },
+    ],
+    [
+      'a commit added after the read',
+      {
+        timeline: [
+          { event: 'committed', sha: MOVED, committer: { date: '2026-09-27T09:45:00Z' } },
+          labeled(),
+        ],
+      },
+    ],
+    ['park record without head_read_at', { readParkRecord: parkRecordFor({ headReadAt: null }) }],
+  ];
+  for (const trust of [0, 1, 2]) {
+    for (const [label, s] of cases) {
+      const { result, calls } = approveWith({ policy: policyOf({ trust }), ...s });
+      assertConsequence(result, calls, 're-review', `${label} (trust ${trust})`);
+    }
+  }
+  // A push BEFORE the read is not a push after it: still merge-when-green,
+  // and the PR's timeline (the item IS the PR) is read once for both checks.
+  const before = approveWith({ timeline: [forced('2026-09-27T09:00:00Z'), labeled()] });
+  assertConsequence(before.result, before.calls, 'merge-when-green', 'push before the read');
+  assertEqual(
+    before.calls.filter((c) => String(c.argv[1]).includes('/timeline?')).length,
+    1,
+    'one timeline read serves the push and label checks',
+  );
+});
+
+test('approve consequence (review F9): a resolver that throws AFTER the write reports unknown, never a failed verb', () => {
+  // A policy the gate-name resolver throws on (read after the label write).
+  const policy = {
+    review: { trust: 0 },
+    agent: { provider: 'claude' },
+    get gates() {
+      throw new Error('policy gates unreadable');
+    },
+  };
+  const { result, calls } = approveWith({ policy });
+  assertEqual(result.ok, true, 'the label was applied — the verb succeeded');
+  assertEqual(result.effect.consequence, 'unknown', result.reason);
+  assertEqual(calls.length, 1, 'no read after the unresolvable policy');
+});
+
+test('approve consequence unknown: any unreadable input is unknown — never a guess', () => {
+  const cases = [
+    ['trail read fails', { trail: ghError('http-502', 'HTTP 502') }],
+    ['head read fails', { head: ghError('timeout', 'gh api timed out after 60000 ms') }],
+    ['parked result not on this host', { readParkedResult: () => null }],
+    [
+      'parked result unreadable',
+      {
+        readParkedResult: () => {
+          throw new Error('EACCES');
+        },
+      },
+    ],
+    ['no gate pause at all', { trail: ['just a comment'] }],
+    [
+      'latest gate is not review:merge',
+      { trail: [gateBody(), gateBody({ gate: 'ci:unverified', parked: null })] },
+    ],
+    ['park record not on this host', { readParkRecord: () => null }],
+    [
+      'park record unreadable',
+      {
+        readParkRecord: () => {
+          throw new Error('EACCES');
+        },
+      },
+    ],
+  ];
+  for (const [label, s] of cases) {
+    const { result, calls } = approveWith(s);
+    assertConsequence(result, calls, 'unknown', label);
+  }
+});
+
+test('approve consequence unknown: an unreadable autonomy policy (the real loader) is unknown', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verity-act-policy-'));
+  try {
+    fs.mkdirSync(path.join(dir, '.verity'));
+    // trust 9 is out of range — loadPolicy refuses it (PolicyError).
+    fs.writeFileSync(path.join(dir, '.verity', 'autonomy.yml'), 'review:\n  trust: 9\n');
+    const gh = fakeGh(scenario({}));
+    const result = operatorAct.act('approve', ['42'], {
+      repo: REPO,
+      cwd: dir,
+      substrate: 'github',
+      run: gh.run,
+      readParkedResult: parkedResult('approve'),
+    });
+    assertConsequence(result, gh.calls, 'unknown', 'policy unreadable');
+    assert(result.reason.includes('policy could not be read'), result.reason);
+    assertEqual(gh.calls.length, 1, 'no read is taken once the policy is unreadable');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('approve whose label write FAILS carries no consequence, takes no read, and keeps its failure reason', () => {
+  const { result, calls } = approveWith({ labelError: ghError('http-403', 'HTTP 403: nope') });
+  assertEqual(result.ok, false, 'fails closed');
+  assertEqual(calls.length, 1, 'only the attempted write — no prediction reads');
+  assert(!('consequence' in result.effect), 'no consequence for a token that was not applied');
+  assert(/^approve on #42 failed: /.test(result.reason), result.reason);
+});
+
+// Parity: the act verb's consequence and the worker's gate copy are one
+// decision. For every input combination the worker's approvalHint words the
+// consequence trust.approvalConsequence returns — its text belongs to that
+// consequence's family and to no family it contradicts.
+const HINT_FAMILIES = {
+  'merge-when-green': (t) =>
+    /the next tick merges (when|once) CI is green|CI is not green; apply `verity:approved` once it is, from a human account/.test(
+      t,
+    ),
+  // v2 `resume`: a parked NON-approve verdict re-gates at zero cost.
+  resume: (t) =>
+    /approving the unchanged head re-gates at zero cost/.test(t) &&
+    !/next tick merges|re-run the trust ladder/.test(t),
+  're-review': (t) =>
+    /re-review|fresh review at full price/.test(t) &&
+    !/approving the unchanged head re-gates at zero cost/.test(t) &&
+    !/next tick merges/.test(t),
+  gate: (t) => /never merges|does not merge/.test(t) && !/next tick merges/.test(t),
+  // Review F5: trust 1/2 + approve — the ladder re-runs and MAY merge.
+  unknown: (t) => /re-run the trust ladder/.test(t) && !/re-gates at zero cost/.test(t),
+};
+
+test('parity: approvalHint and trust.approvalConsequence agree across the shared input matrix', () => {
+  let n = 0;
+  for (const trust of [0, 1, 2, 7]) {
+    for (const verdict of ['approve', 'request_changes', 'escalate', 'lgtm', null, '']) {
+      for (const mergeAuthority of [true, false]) {
+        for (const hasPr of [true, false]) {
+          for (const resumable of [true, false]) {
+            for (const greenKnown of [true, false, null]) {
+              for (const approved of [false, true]) {
+                const inputs = { trust, verdict, mergeAuthority, hasPr, resumable };
+                const c = trustLadder.approvalConsequence(inputs);
+                assert(trustLadder.APPROVAL_CONSEQUENCES.includes(c), `a v2 value: ${c}`);
+                assert(
+                  c !== 'unknown' ||
+                    ((trust === 1 || trust === 2) &&
+                      verdict === 'approve' &&
+                      mergeAuthority &&
+                      hasPr &&
+                      resumable),
+                  `the pure decision says unknown only for trust 1/2 + approve (F5): ${JSON.stringify(inputs)}`,
+                );
+                const hint = worker.approvalHint({ ...inputs, greenKnown, approved });
+                assert(
+                  HINT_FAMILIES[c](hint),
+                  `hint for ${JSON.stringify(inputs)} (${c}) words another consequence: ${hint}`,
+                );
+                n += 1;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  assert(n > 1000, `the matrix is exhaustive (${n})`);
+});
+
+test('parity: each act scenario reports exactly what the shared function decides for its inputs', () => {
+  const rows = [
+    [{}, { trust: 0, verdict: 'approve', resumable: true }],
+    [{ head: MOVED }, { trust: 0, verdict: 'approve', resumable: false }],
+    [
+      { readParkedResult: parkedResult('request_changes') },
+      { trust: 0, verdict: 'request_changes', resumable: true },
+    ],
+    [
+      { readParkedResult: parkedResult('escalate') },
+      { trust: 0, verdict: 'escalate', resumable: true },
+    ],
+    [{ policy: policyOf({ trust: 2 }) }, { trust: 2, verdict: 'approve', resumable: true }],
+  ];
+  for (const [s, inputs] of rows) {
+    const { result } = approveWith(s);
+    assertEqual(
+      result.effect.consequence,
+      trustLadder.approvalConsequence({ mergeAuthority: true, hasPr: true, ...inputs }),
+      `act ≡ shared decision for ${JSON.stringify(inputs)}`,
+    );
+  }
 });

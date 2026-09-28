@@ -35,8 +35,11 @@
 // plus the T13 trust ladder (§4.5): when the REVIEW role completes with
 // outcome success, its verdict (`artifacts.verdict` in the T05 marker —
 // 'approve' | 'request_changes') is applied deterministically HERE:
-//   trust 0 → never merge (gate); trust 1 → trust.classify() low-risk →
-//   `gh pr merge --squash`, else gate; trust 2 → merge if checks green.
+//   trust 0 → never merge autonomously (gate) — stage 111: the consumed
+//   `verity:approved` on a resumed review:merge park IS the human merge
+//   decision, so approve + approval + checks green merges; trust 1 →
+//   trust.classify() low-risk → `gh pr merge --squash`, else gate; trust 2 →
+//   merge if checks green.
 // Merge authority lives in this worker, never in the review agent — the
 // review allowlist (T06) has no merge tool, and a success WITHOUT an explicit
 // approve verdict gates (fail closed; it never merges and never loops).
@@ -110,9 +113,41 @@
 // Fail-closed both ways: a moved PR head, a missing/unreadable parked file, or
 // a non-success parked outcome refuses the resume LOUDLY and falls back to a
 // fresh dispatch announced as a repurchase — an approval is never a no-op.
-// Pre-completion gates (ci:unverified, review:merge, role-declared) and the
-// stage-25 failed-run park record no pointer and keep their semantics
-// byte-for-byte; claude never parks here (its costs are real numbers).
+// Pre-completion gates (ci:unverified, role-declared) and the stage-25
+// failed-run park record no pointer and keep their semantics byte-for-byte;
+// claude never parks here (its costs are real numbers).
+//
+// Stage 111 (ADR-0014 amended 2026-09-27, #291/#292): a review:merge park made
+// after a COMPLETED review with a verdict is a post-completion park too, so it
+// records the same pointer (any provider). Its approval resumes the recorded
+// verdict on an unchanged head at zero cost; at trust 0 that approval is the
+// human merge decision (approve + green → merge, the token consumed by the
+// merge; approve + not green → re-gate, the token LEFT for the next tick), and
+// any other verdict re-gates at zero cost. Its approve line is approvalHint's
+// configuration-true copy, never the bare "apply label".
+//
+// Stage 111 review (REQUEST CHANGES) — the merge-on-approval path merges only a head a
+// review examined, on a decision a human made after seeing it:
+//   F1  a gate comment is a pause only if the worker's BOT wrote it (unknown
+//       bot identity ⇒ no pointer at all), and a pointer resumes only if it
+//       matches the local park record (~/.verity/logs/<run>/park.json) the
+//       worker wrote when it posted it — a forged or edited pointer re-reviews;
+//   F2  a review's pointer anchors to the PR head read BEFORE the review ran;
+//       round 3 (N1): a head that moved by park time records NO resumable
+//       pointer, and a resumed approve verdict is refused (fresh review) when
+//       the PR's timeline shows any push at/after that read (GitHub's own
+//       `updatedAt` from the read vs the events' `created_at` — an A→B→A
+//       inside the review window is caught; unreadable ⇒ no merge);
+//   F3/F4 the label merges only if its latest `labeled` event (issue
+//       timeline) is newer than the bot gate comment it answers, by an actor
+//       that is not the bot and, when `humans:` is set, is listed there — else
+//       the verdict re-gates at zero cost and the stale label is consumed;
+//   F6  an approved merge that does not land (CI red, GitHub refusal) retries
+//       without new gate comments, at most MAX_APPROVED_MERGE_ATTEMPTS ticks
+//       per parked verdict (round 3, N4: no label, refused or honoured,
+//       restarts the count), then parks `verity:needs-human`;
+//   F11 a verdict naming a PR other than the one the review was dispatched for
+//       is never acted on (round 3, N2: its findings land on the dispatched PR).
 //
 // SUMMARIZE posts the §7 run-summary comment (exact template, one append-only
 // comment per run), calls the T11 recordUsage seam, and the lock is released
@@ -171,10 +206,109 @@ const scanner = require('../bin/lib/scanner.cjs');
 const stage = require('../bin/lib/stage.cjs');
 const substrateLocal = require('../bin/lib/substrate-local.cjs');
 const trust = require('../bin/lib/trust.cjs');
+// approvalHint's `trust` parameter shadows the module; the shared decision is
+// bound here once (stage 111 amendment, ADR-0037).
+const { approvalConsequence } = trust;
 const usage = require('../bin/lib/usage.cjs');
 
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
 const USAGE = 'usage: verity-worker --repo owner/name --once';
+// The approval line of every gate EXCEPT a completed review's review:merge park
+// (ci:unverified, unknown-cost, role-declared, pre-dispatch label gates): there
+// the label genuinely advances the item, so the bare instruction is true.
 const APPROVAL_ACTION = 'apply label `verity:approved`';
+
+// Stage 111 (ADR-0014 amended 2026-09-27, #291): the review:merge park's
+// approval line must be TRUE for its configuration — "apply label" appears only
+// where the label can advance the item. Used by the trust-ladder gate comment
+// AND its §7 summary. Inputs: the review trust, the verdict, the green reading
+// (true | false | null = not read), whether the verdict's runtime has merge
+// authority (ADR-0031), and whether this gate already holds a consumed-for-
+// merge approval the worker deliberately left in place (trust 0, CI not green).
+// Stage 111 amendment (ADR-0037, contracts/operator-act-v2.md): WHAT the
+// approval does is decided once, by trust.approvalConsequence — the same pure
+// function `verity operator act approve` reports as `effect.consequence` — and
+// this function only words it, so the gate copy and the act verb can never
+// disagree for the same inputs.
+function approvalHint({
+  trust,
+  verdict,
+  greenKnown = null,
+  mergeAuthority,
+  approved = false,
+  hasPr = true,
+  resumable = true,
+}) {
+  const consequence = approvalConsequence({
+    trust,
+    verdict,
+    mergeAuthority,
+    hasPr,
+    resumable,
+  });
+  const hasVerdict = typeof verdict === 'string' && verdict !== '';
+  if (consequence === 'gate') {
+    if (mergeAuthority !== true) {
+      return 'merge on GitHub; a verdict from this runtime never merges';
+    }
+    if (verdict === 'escalate') {
+      return 'architectural / frozen-contract blocker: resolve via /verity:plan; approval does not merge';
+    }
+    return 'merge on GitHub; an unknown trust level fails closed and never merges';
+  }
+  if (consequence === 're-review') {
+    const noPointer =
+      'this park has no resumable pointer, so any approval re-reviews at full price';
+    if (!hasVerdict) {
+      // No verdict at all leaves no resumable pointer, so approval re-reviews.
+      return 'the review reported no verdict: apply `verity:approved` to re-review (a fresh review at full price), or merge on GitHub';
+    }
+    if (verdict === 'request_changes') {
+      return `the review asked for changes: push a fix (new head) and apply \`verity:approved\` to re-review, or merge on GitHub; ${noPointer}`;
+    }
+    if (verdict !== 'approve') {
+      return `the review verdict '${verdict}' is not approve: push a fix (new head) and apply \`verity:approved\` to re-review, or merge on GitHub; ${noPointer}`;
+    }
+    if (hasPr !== true) {
+      return 'merge on GitHub; the approve verdict named no PR, so Verity cannot act on it — an approval only buys a fresh review at full price';
+    }
+    if (trust === 0) {
+      // No verifiable parked pointer (an unreadable head, or the local
+      // substrate's missing comment trail): an approval can only buy a fresh
+      // review, which gates again — it can never complete this merge.
+      return 'merge the PR yourself, or apply `verity:approved` to re-review at full price — this park has no resumable pointer, so an approval cannot merge';
+    }
+    return `merge on GitHub, or apply \`verity:approved\` to re-review at full price — ${noPointer}`;
+  }
+  if (consequence === 'resume') {
+    // v2 `resume`: a parked NON-approve verdict re-gates at zero cost.
+    if (verdict === 'request_changes') {
+      return 'the review asked for changes: push a fix (new head) and apply `verity:approved` to re-review, or merge on GitHub; approving the unchanged head re-gates at zero cost';
+    }
+    // A recorded verdict string re-gates at zero cost on an unchanged head.
+    return `the review verdict '${verdict}' is not approve: push a fix (new head) and apply \`verity:approved\` to re-review, or merge on GitHub; approving the unchanged head re-gates at zero cost`;
+  }
+  if (consequence === 'unknown') {
+    // Stage 111 review F5: trust 1/2 + approve + a resumable head. The resumed
+    // verdict re-enters the ladder, which MAY merge it — never say "re-gates".
+    if (trust === 1) {
+      return 'merge on GitHub, or apply `verity:approved` to re-run the trust ladder on this approve verdict at zero cost — at trust 1 it merges only a low-risk PR with green checks; an approval never overrides the risk classification';
+    }
+    return 'CI is not green; apply `verity:approved` once it is to re-run the trust ladder on this approve verdict at zero cost — it merges if checks are green by then (or merge on GitHub)';
+  }
+  // merge-when-green: trust 0, approve verdict, a resumable pointer. Stage 111
+  // review F3/F4: the worker honours only a label applied AFTER this comment,
+  // by an account that is not its bot (and is listed in `humans:` when set).
+  if (greenKnown === false) {
+    return approved === true
+      ? '`verity:approved` stays applied — the next tick merges once CI is green (zero new model runs), or merge on GitHub'
+      : "CI is not green; apply `verity:approved` once it is, from a human account (never the worker's bot; one listed in `humans:` if set), or merge on GitHub";
+  }
+  return "apply label `verity:approved` from a human account (never the worker's bot; one listed in `humans:` if set) — the next tick merges when CI is green (zero new model runs)";
+}
 
 function labelName(name) {
   const label = LABELS.find((l) => l.name === name);
@@ -264,8 +398,11 @@ function addLabel(ctx, number, label) {
     substrateLocal.addLabel(ctx.cwd, number, label);
     return;
   }
+  // Stage 112: a label add is idempotent on GitHub (an already-present label is
+  // a 200 no-op), so it keeps the full stage-110 retry — said explicitly.
   gh.run(['api', '-X', 'POST', `${apiBase(ctx, number)}/labels`, '-f', `labels[]=${label}`], {
     cwd: ctx.cwd,
+    idempotent: true,
   });
 }
 
@@ -303,8 +440,14 @@ function postComment(ctx, number, body) {
     );
     return;
   }
+  // Stage 112: a comment POST is NOT idempotent. A timed-out POST that landed
+  // and was retried posted the comment twice — and a doubled run summary read
+  // as two runs to the no-progress breaker. An ambiguous failure throws at once
+  // (GhError.ambiguous); every caller already treats a failed post as its own
+  // best-effort case (summary, findings) or a failed gate step.
   gh.run(['api', '-X', 'POST', `${apiBase(ctx, number)}/comments`, '-f', `body=${body}`], {
     cwd: ctx.cwd,
+    idempotent: false,
   });
 }
 
@@ -431,6 +574,8 @@ const UNKNOWN_COST_GATE = usage.UNKNOWN_COST_GATE;
 const MAX_REPEAT_DISPATCHES = 2;
 const SUMMARY_PREFIX = '🤖 **verity-worker**';
 const SUMMARY_ROLES_RE = /^roles: (.+)$/m;
+// Stage 112: the run id a §7 summary names on its first line (formatRunSummary).
+const SUMMARY_RUN_ID_RE = /^🤖 \*\*verity-worker\*\* `([^`\s]+)`/;
 
 // The roles a past run dispatched, per its §7 summary — or null if this comment
 // is not a run summary at all. `(none)` (a run that dispatched nothing) reads
@@ -452,14 +597,29 @@ function summaryRoles(body) {
 // (locks, gate pauses, humans) are skipped without breaking it. Deliberately a
 // FLOOR: a summary that failed to post simply is not counted, so the guard this
 // feeds can only ever fire late, never early.
+//
+// Stage 112 (#290): the streak counts DISTINCT runs — (run id, roles) — never
+// comment copies. A summary POST that timed out but landed and was re-posted
+// (stage 110 retried every timeout) left two identical summaries, which read as
+// two runs and refused the role's next dispatch as no-progress after ONE real
+// run. A repeated identity is skipped (it neither extends nor breaks the
+// streak), so a duplicate from any cause can never trip MAX_REPEAT_DISPATCHES.
 function countRepeatedRole(comments, role) {
   let streak = 0;
+  const seen = new Set();
   for (let i = (comments || []).length - 1; i >= 0; i -= 1) {
     const comment = comments[i];
-    const roles = summaryRoles(typeof comment === 'string' ? comment : comment?.body);
+    const body = typeof comment === 'string' ? comment : comment?.body;
+    const roles = summaryRoles(body);
     if (roles === null) {
       continue;
     }
+    const runId = SUMMARY_RUN_ID_RE.exec(body)?.[1] ?? body;
+    const identity = `${runId}\u0000${roles.join(' → ')}`;
+    if (seen.has(identity)) {
+      continue;
+    }
+    seen.add(identity);
     if (roles.length !== 1 || roles[0] !== role) {
       break;
     }
@@ -760,7 +920,8 @@ function formatRunSummary(s) {
     );
   }
   if (s.outcome === 'gated') {
-    lines.push(`approve: ${APPROVAL_ACTION}`);
+    // Stage 111: a review:merge park carries its configuration-true hint.
+    lines.push(`approve: ${s.approval_hint ?? APPROVAL_ACTION}`);
   }
   return lines.join('\n');
 }
@@ -770,15 +931,20 @@ function formatRunSummary(s) {
 // records the durable pointer to the PARKED result (`parked`, optional) — the
 // line the next tick's resume parses (PARKED_POINTER_RE below). Every other
 // gate comment is byte-identical to what it was.
-function formatGateComment({ runId, gate, pending, mentions, parked }) {
+// Stage 111 (ADR-0014 amended): a completed review's review:merge park records
+// the same pointer line, and passes its configuration-true `approval` hint
+// (approvalHint above). A pointer re-recorded for a RESUMED result names the run
+// that actually produced it (`parked.runId`) — the parked file lives under THAT
+// run's log directory, never under the resuming run's.
+function formatGateComment({ runId, gate, pending, mentions, parked, approval }) {
   const lines = [
     `⏸️ **verity-worker** \`${runId}\` — paused at human gate \`${gate}\``,
     `pending: ${pending}`,
-    `approve: ${APPROVAL_ACTION}`,
+    `approve: ${approval ?? APPROVAL_ACTION}`,
   ];
   if (parked !== null && parked !== undefined) {
     lines.push(
-      `parked: role \`${parked.role}\` result of run \`${runId}\` at PR #${parked.pr} head ${parked.head} — approving RESUMES this exact result (trust ladder + summary, zero new model runs); if the PR head has moved by then, the approval re-dispatches at full price instead (ADR-0014)`,
+      `parked: role \`${parked.role}\` result of run \`${parked.runId ?? runId}\` at PR #${parked.pr} head ${parked.head} — approving RESUMES this exact result (trust ladder + summary, zero new model runs); if the PR head has moved by then, the approval re-dispatches at full price instead (ADR-0014)`,
     );
   }
   if (mentions.length > 0) {
@@ -797,6 +963,11 @@ function formatGateComment({ runId, gate, pending, mentions, parked }) {
 // beside it bounds what a tampered or stale pointer can do — a mismatch is a
 // loud repurchase, never a resumed lie.
 const GATE_COMMENT_PREFIX = '⏸️ **verity-worker**';
+// Stage 111: which gate a pointer was parked at (the comment's first line).
+// Only a review:merge park's approval is a trust-0 MERGE decision — an
+// unknown-cost park's approval consents to the cost, never to the merge
+// (ADR-0014's rejected alternative: two consents never collapse into one).
+const GATE_NAME_RE = /paused at human gate `([^`]+)`/;
 const PARKED_POINTER_RE =
   /^parked: role `([A-Za-z0-9][A-Za-z0-9._-]*)` result of run `([A-Za-z0-9][A-Za-z0-9._-]*)` at PR #(\d+) head ([0-9a-f]{6,40}|unknown) /m;
 
@@ -804,9 +975,10 @@ const PARKED_POINTER_RE =
 // once, best-effort. No PR → no pointer (nothing verifiable to anchor the
 // resume to — the fallback dispatch is the honest price); an unreadable head
 // records `unknown`, which the resume refuses fail-closed, loudly. Only a
-// COMPLETED result's park ever calls this — the stage-25 failed-run park and
-// every pre-completion gate (ci:unverified, review:merge, role-declared)
-// record no pointer and keep their stages 19/21/22/25/27 semantics untouched.
+// COMPLETED result's park ever calls this (the unknown-cost park and, since
+// stage 111, a completed review's review:merge park) — the stage-25 failed-run
+// park and every pre-completion gate (ci:unverified, role-declared) record no
+// pointer and keep their stages 19/21/22/25/27 semantics untouched.
 // Stage 85 (ADR-0029): the head read is substrate-aware — on 'local' the SHA
 // comes from the stage-80 snapshot's branch mapping + git itself
 // (substrateLocal.localPrHead), never `gh pr view`; a failed local read records
@@ -845,12 +1017,473 @@ function parkedResultPointer(ctx, { role, pr }) {
   return { role, pr, head };
 }
 
-// The most recent gate pause's pointer on a P1 item, or null. The LATEST
-// ⏸️ comment decides: an older parked pointer must never outlive the pause
-// that superseded it (a later review:merge or failed-run park carries no
+// Stage 111 review round 3 (N1): the PRE-DISPATCH head read of a review — the
+// head SHA and GitHub's own `updatedAt` for the PR, from ONE `gh pr view`
+// response (bounded by gh.run's timeout). `updatedAt` is the GitHub-side
+// timestamp the approval tick later compares the PR's push events against:
+// it is taken from the same response as the head, so it is ≤ the moment of
+// the read and no PR update (a push included) happened between it and the
+// read — any push AFTER the read carries a GitHub `created_at` ≥ it. No local
+// clock is involved anywhere in that comparison, so host clock skew cannot
+// widen or narrow the window. github substrate only (the local substrate
+// never honours a pointer). Returns { head, at } — either may be null.
+function prHeadRead(ctx, pr) {
+  const view = gh.json(['pr', 'view', String(pr), '--json', 'headRefOid,updatedAt'], {
+    cwd: ctx.cwd,
+  });
+  const head =
+    typeof view?.headRefOid === 'string' && /^[0-9a-fA-F]{6,40}$/.test(view.headRefOid)
+      ? view.headRefOid.toLowerCase()
+      : null;
+  const at =
+    typeof view?.updatedAt === 'string' && Number.isFinite(Date.parse(view.updatedAt))
+      ? view.updatedAt
+      : null;
+  return { head, at };
+}
+
+// Stage 111 review F2 (+F11) and round 3 (N1a): the pointer a COMPLETED REVIEW
+// parks with. It anchors to the head read BEFORE the review was dispatched
+// (`reviewedHead`) — the head the verdict actually examined — never to the
+// head read now. If the head MOVED while the review ran, the verdict may
+// describe either head (the review reads the live PR, not a pinned SHA), so
+// NO resumable pointer is recorded at all: the gate copy says an approval
+// re-reviews, and the data now agrees (round 2 still recorded the
+// pre-dispatch head, which a force-push back to it made resumable again). A
+// move that returns to the reviewed head INSIDE the window is invisible here;
+// the approval tick's push-event check (pushesSince) refuses it. A verdict
+// whose PR is not the PR this review was dispatched for (or a review with no
+// pre-dispatch read) parks no pointer. The pointer carries the pre-dispatch
+// read's GitHub timestamp (`headReadAt`) for the local park record — it is
+// never posted. Returns { parked, note }.
+function reviewParkPointer(ctx, { pr, targetPr, reviewedHead }) {
+  if (!Number.isInteger(pr)) {
+    return { parked: null, note: null };
+  }
+  if (ctx.substrate === 'local') {
+    // No pointer is ever READ on the local substrate (readParkedPointer), so
+    // its log-only pointer keeps the park-time head, byte-identical to before.
+    return { parked: parkedResultPointer(ctx, { role: 'review', pr }), note: null };
+  }
+  if (targetPr !== pr || reviewedHead === null || reviewedHead.pr !== pr) {
+    return { parked: null, note: null };
+  }
+  const now = parkedResultPointer(ctx, { role: 'review', pr });
+  if (
+    /^[0-9a-f]{6,40}$/.test(reviewedHead.head) &&
+    /^[0-9a-f]{6,40}$/.test(now.head) &&
+    now.head !== reviewedHead.head
+  ) {
+    const note = `PR #${pr}'s head moved while the review ran (${reviewedHead.head} → ${now.head}): the verdict may describe either head, so no resumable result is parked — an approval re-reviews the current head at full price and cannot merge on this verdict`;
+    ctx.stderr(`verity-worker: warn: ${note} (stage 111)`);
+    return { parked: null, note };
+  }
+  return {
+    parked: { role: 'review', pr, head: reviewedHead.head, headReadAt: reviewedHead.at ?? null },
+    note: null,
+  };
+}
+
+// GitHub logins are case-insensitive (the bot-is-human check compares the
+// same way).
+function sameLogin(a, b) {
+  return (
+    typeof a === 'string' &&
+    typeof b === 'string' &&
+    a !== '' &&
+    b !== '' &&
+    a.toLowerCase() === b.toLowerCase()
+  );
+}
+
+// The LATEST gate pause in an item's comment trail (ascending) that the
+// worker's BOT posted, parsed: its gate name, its parked-result pointer (null
+// when that pause recorded none), and the comment's author/created_at — or
+// null when the trail holds no bot-authored gate pause at all. Pure — shared
+// by readParkedPointer below and `verity operator act approve`'s
+// effect.consequence (stage 111 amendment, ADR-0037), so both read the trail
+// the same way.
+//
+// Stage 111 review F1: authorship is the first gate. A comment that merely
+// STARTS with the ⏸️ prefix is text anyone who can comment can write (the PR
+// author included); only a comment whose `user.login` is `botLogin` is a
+// gate pause at all. A non-bot comment is skipped — it neither supplies a
+// pointer nor supersedes the bot's own latest pause. A missing/empty
+// `botLogin` (bot identity unknown) authenticates nothing ⇒ null, so every
+// caller fails closed (no resume, never a merge). String trail entries carry
+// no author and are never accepted.
+function latestGatePause(trail, botLogin) {
+  if (typeof botLogin !== 'string' || botLogin === '') {
+    return null;
+  }
+  for (let i = (trail || []).length - 1; i >= 0; i -= 1) {
+    const c = trail[i];
+    const body = c !== null && typeof c === 'object' ? c.body : null;
+    if (typeof body !== 'string' || !body.startsWith(GATE_COMMENT_PREFIX)) {
+      continue;
+    }
+    if (!sameLogin(c.user?.login, botLogin)) {
+      continue;
+    }
+    const createdAt = typeof c.created_at === 'string' ? c.created_at : null;
+    const { gate, pointer } = parseGatePause(body);
+    return {
+      gate,
+      author: c.user.login,
+      createdAt,
+      pointer: pointer === null ? null : { ...pointer, commentAt: createdAt },
+    };
+  }
+  return null;
+}
+
+// One gate comment's TEXT, parsed — its gate name (first line only) and its
+// pointer line. Says nothing about who wrote it: callers authenticate first
+// (latestGatePause above; the act verb's park-record check).
+function parseGatePause(body) {
+  const g = GATE_NAME_RE.exec(String(body).split('\n')[0]);
+  const gate = g ? g[1] : null;
+  const m = PARKED_POINTER_RE.exec(String(body));
+  return {
+    gate,
+    pointer: m === null ? null : { role: m[1], runId: m[2], pr: Number(m[3]), head: m[4], gate },
+  };
+}
+
+// --- the local park record (stage 111 review F1) -----------------------------
+//
+// The gate comment is a POINTER, and GitHub text is editable by more people
+// than the bot (repository writers can edit any comment; the author stays the
+// bot). So every pointer this worker posts is ALSO recorded on the worker host,
+// beside the parked result it names: ~/.verity/logs/<result-run-id>/park.json.
+// A pointer is honoured only when it matches that record EXACTLY (role, run
+// id, PR, head, gate) and the record's bot is this run's bot — a pointer this
+// host did not write, or one edited after it was written, never resumes (loud
+// fallback to a fresh dispatch; never a merge). The record holds no secret:
+// public identifiers (run id, PR number, commit SHA, gate name, bot login), a
+// timestamp, and the resumed-approval attempt counter (F6). Same availability
+// as the parked result itself — log cleanup that takes one takes the other.
+const PARK_RECORD_FILE = 'park.json';
+const PARK_RECORD_SCHEMA = 1;
+const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// Stage 111 review F6: how many approval ticks may end WITHOUT the approved
+// trust-0 merge landing (CI still not green → the label is kept; or GitHub
+// refused the merge → infra, label kept) before the worker stops retrying and
+// parks the item `verity:needs-human`. Counted per parked verdict (one run id
+// ⇒ one head) — round 3 (N4): a newer label does not restart the count and a
+// refused label's re-gate carries it; only the needs-human park resets it.
+// 3 = the approval tick plus two retries.
+const MAX_APPROVED_MERGE_ATTEMPTS = 3;
+
+function parkRecordPath(runId) {
+  if (typeof runId !== 'string' || !SAFE_RUN_ID.test(runId)) {
+    throw new Error(`invalid run id for a park record: ${JSON.stringify(runId)}`);
+  }
+  return path.join(os.homedir(), '.verity', 'logs', runId, PARK_RECORD_FILE);
+}
+
+// null when no record exists; throws on an unreadable/malformed one (callers
+// fail closed either way).
+function readParkRecord(runId) {
+  const file = parkRecordPath(runId);
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      return null;
+    }
+    throw err;
+  }
+  const rec = JSON.parse(raw);
+  if (rec === null || typeof rec !== 'object' || rec.schema !== PARK_RECORD_SCHEMA) {
+    throw new Error(`${file} is not a schema-${PARK_RECORD_SCHEMA} park record`);
+  }
+  return rec;
+}
+
+// Atomic (tmp + rename) so a reader never sees half a record. The record
+// lives BESIDE the parked result: the run's log directory must already exist
+// (agent-exec created it when the result was persisted). No directory ⇒ no
+// result to point at ⇒ the write fails and recordPark posts no pointer.
+function writeParkRecord(rec) {
+  const file = parkRecordPath(rec.run_id);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify({ schema: PARK_RECORD_SCHEMA, ...rec }, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  fs.renameSync(tmp, file);
+}
+
+// Does `pointer` (parsed from a bot gate comment) match `rec` exactly, for
+// `botLogin`? Returns null when it does, else the refusal reason.
+function parkRecordMismatch(rec, pointer, botLogin) {
+  if (rec === null || rec === undefined) {
+    return 'no local park record exists for it on this host (a pointer this worker did not record is never resumed)';
+  }
+  for (const [key, want] of [
+    ['role', pointer.role],
+    ['run_id', pointer.runId],
+    ['pr', pointer.pr],
+    ['head', pointer.head],
+    ['gate', pointer.gate],
+  ]) {
+    if (rec[key] !== want) {
+      return `the gate comment's ${key} (${JSON.stringify(want)}) does not match the local park record (${JSON.stringify(rec[key])})`;
+    }
+  }
+  if (!sameLogin(rec.bot, botLogin)) {
+    return `the local park record was written by bot ${JSON.stringify(rec.bot)}, not this run's ${JSON.stringify(botLogin)}`;
+  }
+  return null;
+}
+
+// Record the park of `parked` (the pointer about to be posted) at `gate`.
+// Returns the pointer to post, or null when the record could not be written —
+// a pointer without its record could never resume, so it is not posted
+// (the approval then honestly buys a fresh dispatch). Local substrate: no
+// pointer is ever read there (no comment trail), so nothing is recorded.
+//
+// Round 3: the record also carries `head_read_at` — the GitHub-side timestamp
+// of the pre-dispatch head read (N1b; null for a non-review pointer) — and a
+// re-park of a RESUMED verdict carries both it and the F6 attempt counter
+// (`approval`) forward from the record it resumed, so neither the push window
+// nor the attempt bound restarts because the verdict re-gated (N4).
+function recordPark(ctx, parked, { gate, runId, approval = null }) {
+  if (parked === null || parked === undefined || ctx.substrate === 'local') {
+    return parked ?? null;
+  }
+  const resultRunId = parked.runId ?? runId;
+  try {
+    writeParkRecord({
+      role: parked.role,
+      run_id: resultRunId,
+      pr: parked.pr,
+      head: parked.head,
+      gate,
+      bot: ctx.botLogin ?? null,
+      parked_at: new Date().toISOString(),
+      head_read_at: parked.headReadAt ?? null,
+      approval,
+    });
+  } catch (err) {
+    ctx.stderr(
+      `verity-worker: warn: could not write the local park record for run ${resultRunId} (${oneLine(err.message)}) — the gate records no pointer, so an approval buys a fresh dispatch`,
+    );
+    return null;
+  }
+  return parked;
+}
+
+// --- the approval label's provenance (stage 111 review F3/F4) -----------------
+//
+// At trust 0 the `verity:approved` label on a review:merge park is the merge
+// decision, so WHO applied it and WHEN matters. `judgeApprovalEvent` is pure:
+// given the item's issue-timeline events (ascending), the latest bot gate
+// comment's created_at, the bot login and the policy's `humans:` list, it
+// accepts the label only when its LATEST `labeled` event
+//   - is strictly newer than that gate comment (a label applied before — or
+//     while — the gate was posted answers no verdict a human had seen);
+//   - was applied by an actor that is not the worker's bot;
+//   - was applied by a login in `humans:` when that list is non-empty
+//     (GitHub's triage role and issues:write integrations can label but
+//     cannot merge — the label must not hand them merge authority).
+// Any missing/unparseable fact fails closed. Returns { ok, reason, at, actor }.
+function judgeApprovalEvent(events, { gateAt, botLogin, humans }) {
+  const refuse = (reason, ev = null) => ({
+    ok: false,
+    reason,
+    at: ev?.created_at ?? null,
+    actor: ev?.actor?.login ?? null,
+  });
+  if (!Array.isArray(events)) {
+    return refuse('the label timeline is not an event list');
+  }
+  let ev = null;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (
+      e !== null &&
+      typeof e === 'object' &&
+      e.event === 'labeled' &&
+      typeof e.label?.name === 'string' &&
+      e.label.name.toLowerCase() === APPROVED_LABEL
+    ) {
+      ev = e;
+      break;
+    }
+  }
+  if (ev === null) {
+    return refuse(`no \`${APPROVED_LABEL}\` labeled event is on the timeline`);
+  }
+  const labeledAt = Date.parse(ev.created_at);
+  const gateTime = Date.parse(gateAt);
+  if (!Number.isFinite(labeledAt) || !Number.isFinite(gateTime)) {
+    return refuse('the label or gate-comment timestamp is unreadable', ev);
+  }
+  if (labeledAt <= gateTime) {
+    return refuse(
+      `\`${APPROVED_LABEL}\` was applied at ${ev.created_at}, not after the gate comment it would answer (${gateAt})`,
+      ev,
+    );
+  }
+  const actor = ev.actor?.login;
+  if (typeof actor !== 'string' || actor === '') {
+    return refuse(`the \`${APPROVED_LABEL}\` event names no actor`, ev);
+  }
+  if (typeof botLogin !== 'string' || botLogin === '' || sameLogin(actor, botLogin)) {
+    return refuse(
+      `\`${APPROVED_LABEL}\` was applied by the worker's own bot identity (${actor}) — the worker never honours its own label as a merge decision`,
+      ev,
+    );
+  }
+  const list = Array.isArray(humans) ? humans.filter((h) => typeof h === 'string' && h !== '') : [];
+  if (list.length > 0 && !list.some((h) => sameLogin(h, actor))) {
+    return refuse(
+      `\`${APPROVED_LABEL}\` was applied by ${actor}, who is not listed in the policy's \`humans:\``,
+      ev,
+    );
+  }
+  return { ok: true, reason: null, at: ev.created_at, actor };
+}
+
+// The item's issue timeline, every page, ascending — bounded like the comment
+// reader (locks.cjs PER_PAGE/MAX_PAGES) and per call by gh.run's timeout.
+// `run` is the gh seam (default: the worker's gh.json). Throws on any failure.
+// Round 3 (N3): a timeline whose LAST allowed page is still full may hold
+// events past the bound — the latest label or a push among them — so it is
+// never judged truncated: it throws (every caller fails closed).
+const TIMELINE_PER_PAGE = 100;
+const TIMELINE_MAX_PAGES = 50;
+
+function readTimeline(repo, number, readJson) {
+  const all = [];
+  for (let page = 1; page <= TIMELINE_MAX_PAGES; page += 1) {
+    const batch = readJson([
+      'api',
+      `repos/${repo}/issues/${number}/timeline?per_page=${TIMELINE_PER_PAGE}&page=${page}`,
+    ]);
+    if (!Array.isArray(batch)) {
+      throw new Error('the timeline read returned no event list');
+    }
+    all.push(...batch);
+    if (batch.length < TIMELINE_PER_PAGE) {
+      return all;
+    }
+  }
+  throw new Error(
+    `the timeline of #${number} fills all ${TIMELINE_MAX_PAGES} pages the reader may take (${TIMELINE_MAX_PAGES * TIMELINE_PER_PAGE} events) — refusing to judge a possibly truncated timeline`,
+  );
+}
+
+// --- pushes after the review's head read (stage 111 review round 3, N1b) ------
+//
+// The resume re-checks that the PR head still EQUALS the head the review
+// examined — but a head that went A → B → A is equal again while the verdict
+// (the review reads the live PR, not a pinned SHA) may describe B. Returning
+// to A after anything was pushed on top of it is always a non-fast-forward
+// update, which GitHub records on the PR's timeline with its own `created_at`.
+// So a resumed APPROVE verdict is honoured only when the PR's timeline (the
+// MERGE TARGET's — `issues/<pr>/timeline`, which may not be the item carrying
+// the label) shows no push-type event at or after the pre-dispatch head read
+// (`head_read_at`, GitHub's `updatedAt` from that same read — prHeadRead).
+// Push-type events (GitHub REST "issue event types", timeline):
+//   head_ref_force_pushed  the PR's head branch was force-pushed      (created_at)
+//   head_ref_restored      the head branch was restored               (created_at)
+//   head_ref_deleted       the head branch was deleted                (created_at)
+//   committed              a commit was added to the head branch — carries NO
+//                          GitHub timestamp, only the git author/committer
+//                          dates (client-set): judged by committer.date
+//                          (author.date fallback), the reviewed head's own
+//                          commit excluded; a missing/unparseable date refuses.
+//                          Defense in depth only: a commit that stays moves the
+//                          head (the equality check), and one that is removed
+//                          again needs a force-push (the load-bearing signal).
+//   base_ref_force_pushed, base_ref_changed — not listed for the REST
+//                          timeline today, honoured if GitHub serves them: the
+//                          head would then merge into a base the review did
+//                          not see.
+// The comparison is `>=` (a tie is treated as after the read — fail closed).
+// Pure. Returns { ok, reason }.
+const PUSH_EVENTS = [
+  'committed',
+  'head_ref_force_pushed',
+  'head_ref_restored',
+  'head_ref_deleted',
+  'base_ref_force_pushed',
+  'base_ref_changed',
+];
+
+function pushesSince(events, { since, head }) {
+  const refuse = (reason) => ({ ok: false, reason });
+  const sinceMs = typeof since === 'string' ? Date.parse(since) : Number.NaN;
+  if (!Number.isFinite(sinceMs)) {
+    return refuse('no GitHub-side time of the pre-review head read is recorded');
+  }
+  if (!Array.isArray(events)) {
+    return refuse('the PR timeline is not an event list');
+  }
+  const reviewed = typeof head === 'string' ? head.toLowerCase() : '';
+  for (const e of events) {
+    if (e === null || typeof e !== 'object' || !PUSH_EVENTS.includes(e.event)) {
+      continue;
+    }
+    let when;
+    let what = e.event;
+    if (e.event === 'committed') {
+      const sha = typeof e.sha === 'string' ? e.sha.toLowerCase() : '';
+      if (reviewed !== '' && sha !== '' && (sha === reviewed || sha.startsWith(reviewed))) {
+        continue; // the reviewed head's own commit
+      }
+      when = e.committer?.date ?? e.author?.date;
+      what = `committed ${sha === '' ? '(no sha)' : sha.slice(0, 12)}`;
+    } else {
+      when = e.created_at;
+    }
+    const ms = typeof when === 'string' ? Date.parse(when) : Number.NaN;
+    if (!Number.isFinite(ms)) {
+      return refuse(`a \`${what}\` event on the PR timeline carries no readable time`);
+    }
+    if (ms >= sinceMs) {
+      return refuse(
+        `the PR timeline shows \`${what}\` at ${when}, at or after the review's head read (${since})`,
+      );
+    }
+  }
+  return { ok: true, reason: null };
+}
+
+// Worker side: judge the label on `number` against the resumed pointer's gate
+// comment. An unreadable timeline fails closed (not honoured). `events` (when
+// given) is that same timeline already read this tick — the resume's push
+// check reads the PR's timeline, which IS the label's when the item is the PR.
+function verifyApprovalEvent(ctx, policy, number, gateAt, readAlready = null) {
+  let events = readAlready;
+  if (Array.isArray(events)) {
+    return judgeApprovalEvent(events, { gateAt, botLogin: ctx.botLogin, humans: policy.humans });
+  }
+  try {
+    events = readTimeline(ctx.repo, number, (args) => gh.json(args, { cwd: ctx.cwd }));
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `the label timeline of #${number} could not be read (${oneLine(err.message)}) — failing closed`,
+      at: null,
+      actor: null,
+    };
+  }
+  return judgeApprovalEvent(events, { gateAt, botLogin: ctx.botLogin, humans: policy.humans });
+}
+
+// The most recent BOT gate pause's pointer on a P1 item, or null. The LATEST
+// bot ⏸️ comment decides: an older parked pointer must never outlive the pause
+// that superseded it (a later failed-run or pre-completion park carries no
 // pointer line, and that absence is the answer). Best-effort read — a trail we
 // cannot read yields null, and the approval buys a fresh dispatch instead of
 // wedging (the run-4 lesson: an approval must never be a no-op).
+// Stage 111 review F1: with no bot identity there is nothing to authenticate a
+// gate comment against — no pointer, said out loud (fresh dispatch; a fresh
+// review re-gates, so this never merges).
 function readParkedPointer(ctx, item) {
   // Stage 85 (ADR-0029): the pointer LIVES in the gate-comment trail, and the
   // local substrate has no comment surface (contract v1, frozen) — the local
@@ -864,19 +1497,16 @@ function readParkedPointer(ctx, item) {
     );
     return null;
   }
+  if (typeof ctx.botLogin !== 'string' || ctx.botLogin === '') {
+    ctx.stderr(
+      `verity-worker: warn: the bot identity is unknown, so no gate comment on #${item.number} can be authenticated — no parked result is resumed; the approval buys a fresh dispatch (stage 111)`,
+    );
+    return null;
+  }
   try {
     const trail = locks.readComments(item, { repo: ctx.repo, cwd: ctx.cwd });
-    for (let i = (trail || []).length - 1; i >= 0; i -= 1) {
-      const body = typeof trail[i] === 'string' ? trail[i] : trail[i]?.body;
-      if (typeof body !== 'string' || !body.startsWith(GATE_COMMENT_PREFIX)) {
-        continue;
-      }
-      const m = PARKED_POINTER_RE.exec(body);
-      if (m === null) {
-        return null;
-      }
-      return { role: m[1], runId: m[2], pr: Number(m[3]), head: m[4] };
-    }
+    const pause = latestGatePause(trail, ctx.botLogin);
+    return pause === null ? null : pause.pointer;
   } catch (err) {
     ctx.stderr(
       `verity-worker: warn: could not read the parked-result pointer on #${item.number}: ${oneLine(err.message)}`,
@@ -892,8 +1522,18 @@ function readParkedPointer(ctx, item) {
 // as a repurchase. The returned result carries VERIFIED zeros (tokens, cost,
 // wall): this run spawned no provider, so its ledger rows must never say
 // unknown and must never re-count the parked run's tokens.
-function resumeParkedResult(ctx, { agentCfg, pointer }) {
-  const refuse = (reason) => ({ res: null, from: null, reason });
+//
+// Stage 111 (ADR-0014 amended): `requireVerdict` — set for a review:merge
+// park, whose whole point is the recorded verdict — additionally refuses a
+// parked result that carries no verdict string (loud fallback, never a
+// resumed guess). The unknown-cost park never sets it (byte-identical).
+//
+// Stage 111 review F1: the pointer must also match the LOCAL park record the
+// worker wrote when it posted it (recordPark) — exactly, for this run's bot.
+// The record rides back on the attempt (`record`) for the resumed-approval
+// attempt counter (F6).
+function resumeParkedResult(ctx, { agentCfg, pointer, requireVerdict = false }) {
+  const refuse = (reason) => ({ res: null, from: null, reason, record: null, pushCheck: null });
   const who = `parked ${pointer.role} result of run ${pointer.runId}`;
   if (!/^[0-9a-f]{6,40}$/.test(pointer.head)) {
     return refuse(`${who} recorded no verifiable head SHA at park time`);
@@ -926,12 +1566,75 @@ function resumeParkedResult(ctx, { agentCfg, pointer }) {
   if (parked === null) {
     return refuse(`${who} is missing from ~/.verity/logs — log cleanup must have taken it`);
   }
+  let record;
+  try {
+    record = readParkRecord(pointer.runId);
+  } catch (err) {
+    return refuse(`${who}'s local park record is unreadable (${oneLine(err.message)})`);
+  }
+  const mismatch = parkRecordMismatch(record, pointer, ctx.botLogin);
+  if (mismatch !== null) {
+    return refuse(`the gate pointer to the ${who} is not honoured: ${mismatch}`);
+  }
   // Stage 25 boundary, belt-and-braces (the failed-run park never writes a
   // pointer in the first place): only a COMPLETED result is resumable. A
   // failed park's approval means "let the day proceed", never "replay the
   // failure" — ADR-0014 scopes resume to post-completion parks of successes.
   if (parked.outcome !== 'success') {
     return refuse(`${who} is not a completed success (outcome ${parked.outcome})`);
+  }
+  if (
+    requireVerdict &&
+    (typeof parked.artifacts?.verdict !== 'string' || parked.artifacts.verdict === '')
+  ) {
+    return refuse(`${who} carries no review verdict to resume`);
+  }
+  // Stage 111 review round 3 (N1b): a parked review APPROVE verdict is the
+  // only resumed result that can reach a merge (at any trust — trust 1/2 merge
+  // a resumed approve too, pinned to the same head). Before it is honoured,
+  // the MERGE TARGET's timeline (`issues/<pointer.pr>/timeline`) must show no
+  // push since the review's pre-dispatch head read (pushesSince). A push found
+  // is the same fact as a moved head (the verdict may describe another head):
+  // the resume REFUSES and the approval buys a fresh review, announced as a
+  // repurchase — never a zero-cost re-gate, which would re-park a verdict no
+  // later approval could ever merge. A record with no read time (parked before
+  // this check existed) refuses the same way. An UNREADABLE timeline says
+  // nothing about the verdict: the resume proceeds, flagged unverified, and
+  // the ladder refuses the merge and re-gates at zero cost (the F3 refusal
+  // path) — `pushCheck` rides back for that, with the events for reuse.
+  let pushCheck = null;
+  if (
+    pointer.role === 'review' &&
+    ctx.substrate !== 'local' &&
+    typeof parked.artifacts?.verdict === 'string' &&
+    parked.artifacts.verdict.toLowerCase() === 'approve'
+  ) {
+    const since = record?.head_read_at;
+    if (typeof since !== 'string' || !Number.isFinite(Date.parse(since))) {
+      return refuse(
+        `${who}'s park record carries no GitHub-side time for the review's pre-dispatch head read (parked before stage 111 review round 3) — a push to PR #${pointer.pr} after that read cannot be ruled out`,
+      );
+    }
+    let events = null;
+    try {
+      events = readTimeline(ctx.repo, pointer.pr, (args) => gh.json(args, { cwd: ctx.cwd }));
+    } catch (err) {
+      pushCheck = {
+        verified: false,
+        reason: `PR #${pointer.pr}'s timeline could not be read to rule out a push after the review's head read (${oneLine(err.message)}) — failing closed`,
+        pr: pointer.pr,
+        events: null,
+      };
+    }
+    if (events !== null) {
+      const pushes = pushesSince(events, { since, head: pointer.head });
+      if (!pushes.ok) {
+        return refuse(
+          `PR #${pointer.pr} was pushed to after the review read its head (${pushes.reason}) — the approved verdict may describe a head other than ${pointer.head}`,
+        );
+      }
+      pushCheck = { verified: true, reason: null, pr: pointer.pr, events };
+    }
   }
   return {
     res: {
@@ -947,6 +1650,8 @@ function resumeParkedResult(ctx, { agentCfg, pointer }) {
     },
     from: { runId: pointer.runId, role: pointer.role },
     reason: null,
+    record,
+    pushCheck,
   };
 }
 
@@ -967,6 +1672,28 @@ function recordUsage(ctx, _policy, summary) {
     usage.record(ctx.cwd, summary);
   } catch (err) {
     ctx.stderr(`verity-worker: warn: failed to record usage: ${oneLine(err.message)}`);
+  }
+}
+
+// Stage 112 (#283 S1) — run start, before the seed and the daily-limit check:
+// resolve WHERE the usage ledger lives. usage.ledgerPath falls back to the
+// in-tree path only when git says this is not a repository; any other git
+// failure (a timeout, `dubious ownership`, a broken config) throws
+// LedgerPathError — and the run is refused here as infra (exit 30), before any
+// gh call or dispatch. The alternative is reading a stale or empty fallback
+// file while every other process uses the git-dir ledger: the daily breaker
+// would read (near) zero and under-enforce the cap.
+function locateLedger(ctx) {
+  try {
+    usage.ledgerPath(ctx.cwd);
+  } catch (err) {
+    if (err instanceof usage.LedgerPathError) {
+      throw new WorkerError(
+        `${oneLine(err.message)} — refusing the run: the daily limits cannot be checked against a ledger that cannot be located, and reading it as empty would under-enforce them`,
+        'ledger-path',
+      );
+    }
+    throw err;
   }
 }
 
@@ -1163,7 +1890,7 @@ function startupChecks(ctx, policy) {
 
 // `target` is the gate's GitHub item number (the dispatch decision's issue/PR,
 // or the trust ladder's PR) — NOT necessarily the run's locked anchor.
-function gatePause(ctx, { runId, policy, target, gate, pending, parked = null }) {
+function gatePause(ctx, { runId, policy, target, gate, pending, parked = null, approval }) {
   if (target === null) {
     ctx.stderr('verity-worker: note: gated with no GitHub target — gate label/comment skipped');
     return;
@@ -1172,7 +1899,14 @@ function gatePause(ctx, { runId, policy, target, gate, pending, parked = null })
   postComment(
     ctx,
     target,
-    formatGateComment({ runId, gate, pending, mentions: policy.notify?.mention || [], parked }),
+    formatGateComment({
+      runId,
+      gate,
+      pending,
+      mentions: policy.notify?.mention || [],
+      parked,
+      approval,
+    }),
   );
 }
 
@@ -1287,6 +2021,23 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
   let parkedPointer = item.tier === 'P1' && lockable(item) ? readParkedPointer(ctx, item) : null;
   let resumedFrom = null; // { runId, role } once a parked result was consumed
   let repurchase = null; // the loud reason a refused resume dispatched fresh
+  // Stage 111 (ADR-0014 amended): the pointer a resume consumed (its verified
+  // head re-anchors any re-park and pins the approved merge), and whether it
+  // was a completed review's review:merge park — the ONLY park whose approval
+  // is a trust-0 merge decision, and whose token consumption is deferred to
+  // the trust ladder (consumed on a merge or a re-gate; LEFT in place when the
+  // approved merge only waits for CI).
+  let resumedPointer = null;
+  let reviewMergeResume = false;
+  let resumedRecord = null; // the local park record the resumed pointer matched (F1/F6)
+  // Round 3 (N1b): the resumed approve verdict's push check — null when none
+  // applied; { verified, reason, pr, events } otherwise (resumeParkedResult).
+  let resumedPushCheck = null;
+  // Stage 111 review F2: the PR head read BEFORE a review is dispatched — the
+  // head the review examined. A fresh review's pointer anchors to it, never to
+  // the head read at park time (a push landing mid-review must not become the
+  // head an approval merges). { pr, head } | null; head 'unknown' if unread.
+  let reviewedHead = null;
 
   // Stage 19: what `verity next` should do with a PR whose CI is UNVERIFIABLE.
   // Normally the policy decides (limits.unverified_ci_behavior, default-closed
@@ -1329,7 +2080,7 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
   let repeats = null;
   let repeatKey = null;
 
-  const summary = (outcome, result, gate = null) => ({
+  const summary = (outcome, result, gate = null, extra = {}) => ({
     runId,
     repo: ctx.repo,
     item: { kind: item.kind, number: item.number ?? null, tier: item.tier },
@@ -1368,6 +2119,8 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
     // announced repurchase when the resume had to refuse.
     ...(resumedFrom !== null ? { resumed_from: resumedFrom } : {}),
     ...(repurchase !== null ? { repurchase } : {}),
+    // Stage 111: a review:merge park's configuration-true approval line.
+    ...extra,
   });
   const gatedResult = (gate) =>
     `${lastPr === null ? '' : `PR #${lastPr} opened, `}gated at ${gate}`;
@@ -1462,15 +2215,32 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
       plan.target.kind === 'pr' &&
       plan.target.number === parkedPointer.pr
     ) {
-      const attempt = resumeParkedResult(ctx, { agentCfg: roleCfg, pointer: parkedPointer });
+      const pointer = parkedPointer;
+      const isReviewMergePark =
+        pointer.role === 'review' && pointer.gate === gateNameFor('review', policy);
+      const attempt = resumeParkedResult(ctx, {
+        agentCfg: roleCfg,
+        pointer,
+        requireVerdict: isReviewMergePark,
+      });
       parkedPointer = null;
       if (attempt.res !== null) {
         res = attempt.res;
         resumed = true;
         resumedFrom = attempt.from;
+        resumedPointer = pointer;
+        resumedRecord = attempt.record;
+        resumedPushCheck = attempt.pushCheck;
+        reviewMergeResume = isReviewMergePark;
         // Stage 32: resolving the parked COMPLETED result IS the deferred work
         // the approval authorized (stage 31) — consume here, exactly once.
-        consumeApproval();
+        // Stage 111: except a review:merge park, whose token the trust ladder
+        // below consumes (merge or re-gate) or deliberately keeps (approved at
+        // trust 0, CI not yet green) — the ladder is reached unconditionally
+        // from here (a resumed review is a verified-zero-cost success).
+        if (!reviewMergeResume) {
+          consumeApproval();
+        }
         ctx.stderr(
           `verity-worker: note: resuming the parked ${attempt.from.role} result of run ${attempt.from.runId} — zero new model runs, verified zero new cost (ADR-0014)`,
         );
@@ -1602,6 +2372,41 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
       // worker always passes and a human never does. Its ABSENCE is exactly
       // today's behavior (an interactive run is unaffected).
       dispatchFlags['worker-dispatch'] = true;
+      // Stage 111 review F2: pin down the head this review will examine,
+      // before it runs. Read once, bounded (prHeadSha: gh.run's timeout, or
+      // git on local); an unreadable head records 'unknown', which no resume
+      // ever honours (fail closed — the approval then re-reviews).
+      // Local substrate: no pointer is ever honoured there (no comment trail),
+      // so no read is taken — no new git spawn on that path.
+      // Round 3 (N1b): the same response also yields GitHub's timestamp for
+      // the read (prHeadRead) — a head with no readable timestamp is recorded
+      // 'unknown' too (a later push could not be ruled out).
+      reviewedHead = null;
+      if (
+        ctx.substrate !== 'local' &&
+        plan.role === 'review' &&
+        plan.target !== null &&
+        plan.target.kind === 'pr'
+      ) {
+        let head = 'unknown';
+        let at = null;
+        try {
+          const read = prHeadRead(ctx, plan.target.number);
+          if (read.head !== null && read.at !== null) {
+            head = read.head;
+            at = read.at;
+          } else {
+            ctx.stderr(
+              `verity-worker: warn: PR #${plan.target.number}'s pre-review head read carried no ${read.head === null ? 'head SHA' : 'GitHub updatedAt timestamp'} — its verdict records head 'unknown', so an approval re-reviews rather than resumes (stage 111)`,
+            );
+          }
+        } catch (err) {
+          ctx.stderr(
+            `verity-worker: warn: could not read PR #${plan.target.number}'s head before the review — its verdict records head 'unknown', so an approval re-reviews rather than resumes (${oneLine(err.message)})`,
+          );
+        }
+        reviewedHead = { pr: plan.target.number, head, at };
+      }
       res = agentExec.dispatch([plan.role, ...plan.args], dispatchFlags);
       // Stage 32 — the consumption point for a FRESH dispatch, and the
       // pre-work-vs-mid-work discriminator. A dispatch that spawned a model
@@ -1661,7 +2466,24 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
         );
       }
     } else {
-      performResultEffects(ctx, { runId, role: plan.role, res, pr: lastPr });
+      // Stage 111 review round 3 (N2): a REVIEW dispatched for a PR whose
+      // verdict names ANOTHER PR (F11) is never acted on — and its findings
+      // are not written to the model-named PR either: they land on the PR the
+      // review was dispatched for, where its gate is posted.
+      let effectsPr = lastPr;
+      if (
+        plan.role === 'review' &&
+        plan.target !== null &&
+        plan.target.kind === 'pr' &&
+        Number.isInteger(res.artifacts?.pr) &&
+        res.artifacts.pr !== plan.target.number
+      ) {
+        effectsPr = plan.target.number;
+        ctx.stderr(
+          `verity-worker: warn: the review dispatched for PR #${plan.target.number} names PR #${res.artifacts.pr} — its findings are posted on PR #${plan.target.number}, never on the PR the model named (stage 111)`,
+        );
+      }
+      performResultEffects(ctx, { runId, role: plan.role, res, pr: effectsPr });
     }
 
     // Stage 37 (canary run 6, finding N1): where a POST-dispatch park announces
@@ -1807,7 +2629,21 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
           // the gate records the durable pointer an approval resumes from.
           // The stage-25 failed-run park above records none: a failure's
           // approval lets the day proceed, it never replays the failure.
-          parked: parkedResultPointer(ctx, { role: plan.role, pr: lastPr }),
+          // Stage 111 review F1/F2/F11: every posted pointer is recorded
+          // locally first; a REVIEW's pointer anchors to the head read before
+          // it ran and exists only for the PR it was dispatched for.
+          parked: recordPark(
+            ctx,
+            plan.role === 'review'
+              ? reviewParkPointer(ctx, {
+                  pr: lastPr,
+                  targetPr:
+                    plan.target !== null && plan.target.kind === 'pr' ? plan.target.number : null,
+                  reviewedHead,
+                }).parked
+              : parkedResultPointer(ctx, { role: plan.role, pr: lastPr }),
+            { gate: UNKNOWN_COST_GATE, runId },
+          ),
         });
         return summary('gated', gatedResult(UNKNOWN_COST_GATE), UNKNOWN_COST_GATE);
       }
@@ -1847,6 +2683,81 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
       const reviewEntry = tiers.getTier(roleCfg.provider);
       const hasMergeAuthority = reviewEntry !== null && reviewEntry.merge_authority === true;
 
+      // Stage 111 review F11: the PR the dependency engine dispatched this
+      // review FOR. The verdict's own `artifacts.pr` is a model claim; a
+      // verdict naming a different PR is never acted on (no merge, no pointer).
+      const targetPr =
+        plan.target !== null && plan.target.kind === 'pr' ? plan.target.number : null;
+      const prMismatch = pr !== null && targetPr !== null && pr !== targetPr;
+
+      // Stage 111 (ADR-0014 amended 2026-09-27, #291): the trust-0 approval
+      // fact. TRUE only when every link holds: this run resumed a completed
+      // review's review:merge park (so the verdict is the exact one the human
+      // read, on a head re-verified unchanged, from a BOT-authored gate comment
+      // matching the local park record — review F1), for this PR, which is the
+      // PR the decision targets (F11), on a decision the dependency engine
+      // derived from the label gate (`plan.approved`), for a P1 item whose
+      // single-use token this run holds — AND (review F3/F4) that token's
+      // latest `labeled` event is newer than the gate comment it answers, by an
+      // actor that is not the bot (and is in `humans:` when configured). A
+      // moved head never gets here (the resume refused → a FRESH review, whose
+      // verdict no human has seen, re-gates) — an approval never merges a head
+      // it did not examine. A refused label buys a zero-cost RE-GATE: the
+      // resumed verdict gates again (a new bot gate comment) and the stale
+      // token is consumed, so only a label applied after that comment merges.
+      const approvalCandidate =
+        reviewMergeResume &&
+        resumedPointer !== null &&
+        resumedPointer.pr === pr &&
+        targetPr === pr &&
+        plan.approved === true &&
+        item.tier === 'P1';
+      // Round 3 (N1b): a resumed approve verdict whose PR timeline could not
+      // be read to rule out a push after the review's head read never merges
+      // (any trust) — it re-gates at zero cost, the pointer kept, exactly as
+      // an unreadable label timeline does (F3). A push FOUND never gets here:
+      // the resume refused and this is a fresh review.
+      const pushUnverified =
+        resumedPointer !== null && resumedPushCheck !== null && resumedPushCheck.verified !== true;
+      let approvalEvent = null; // the verified `labeled` event ({ at, actor })
+      let approvalRefusal = null;
+      if (
+        approvalCandidate &&
+        hasMergeAuthority &&
+        verdict === 'approve' &&
+        trustLevel === 0 &&
+        pushUnverified
+      ) {
+        approvalRefusal = resumedPushCheck.reason;
+      } else if (
+        approvalCandidate &&
+        hasMergeAuthority &&
+        verdict === 'approve' &&
+        trustLevel === 0
+      ) {
+        // The label lives on the ITEM (`item.number`); the push check read the
+        // merge target's timeline (`resumedPushCheck.pr`). Same number ⇒ the
+        // same timeline, read once this tick.
+        const judged = verifyApprovalEvent(
+          ctx,
+          policy,
+          item.number,
+          resumedPointer.commentAt,
+          resumedPushCheck !== null && resumedPushCheck.pr === item.number
+            ? resumedPushCheck.events
+            : null,
+        );
+        if (judged.ok) {
+          approvalEvent = judged;
+        } else {
+          approvalRefusal = judged.reason;
+          ctx.stderr(
+            `verity-worker: warn: \`${APPROVED_LABEL}\` on #${item.number} is not honoured as the trust-0 merge decision: ${judged.reason} — the parked verdict re-gates at zero cost (stage 111)`,
+          );
+        }
+      }
+      const approvedMerge = approvalCandidate && approvalEvent !== null;
+      let green = null; // the green reading, when the ladder takes one
       let decision;
       if (!hasMergeAuthority) {
         decision = {
@@ -1864,21 +2775,199 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
           gate: true,
           reason: 'approve verdict carries no PR number — cannot act deterministically',
         };
+      } else if (prMismatch) {
+        decision = {
+          merge: false,
+          gate: true,
+          reason: `the approve verdict names PR #${pr}, but this review was dispatched for PR #${targetPr} — a verdict about another PR is never acted on (fail closed)`,
+        };
+      } else if (pushUnverified && trustLevel !== 0) {
+        // Trust 0 reaches its own branch below: approvalRefusal already holds
+        // this reason, so decideMerge gates without an approval.
+        decision = {
+          merge: false,
+          gate: true,
+          reason: `the resumed approve verdict is not acted on: ${resumedPushCheck.reason}`,
+        };
       } else if (trustLevel === 1) {
         const classification = trust.classify(pr, policy, ghOpts);
-        decision = trust.decideMerge(verdict, 1, classification, classification.checks_green);
+        green = classification.checks_green;
+        decision = trust.decideMerge(verdict, 1, classification, green);
       } else if (trustLevel === 2) {
-        decision = trust.decideMerge(verdict, 2, null, trust.checksGreen(pr, ghOpts));
+        green = trust.checksGreen(pr, ghOpts);
+        decision = trust.decideMerge(verdict, 2, null, green);
+      } else if (trustLevel === 0) {
+        // Stage 111: trust 0 reads green exactly as trust 2 does — the merge
+        // an approval completes still demands a VERIFIED green reading, and
+        // the gate copy needs it to say something true.
+        green = trust.checksGreen(pr, ghOpts);
+        decision = trust.decideMerge(verdict, 0, null, green, { approved: approvedMerge });
       } else {
-        // trust 0 (and anything unknown — decideMerge fails closed on those).
+        // anything unknown — decideMerge fails closed on those.
         decision = trust.decideMerge(verdict, trustLevel, null, null);
       }
 
+      // Stage 111 review F6: an approved trust-0 merge that does not land (CI
+      // still not green, or GitHub refused the merge) keeps the label so the
+      // next tick retries — but not forever. Each such tick bumps the attempt
+      // counter on the local park record (per parked verdict ⇒ per head); the
+      // MAX_APPROVED_MERGE_ATTEMPTS'th parks the item `verity:needs-human`
+      // (scanner-invisible) with the token consumed and NO gate comment. A
+      // counter that cannot be recorded fails closed to the same park. Returns
+      // the run summary to end with, or null to carry on retrying.
+      // Round 3 (N4): the count is per parked verdict ONLY — a newer label
+      // does not restart it, and a refused label's zero-cost re-gate carries
+      // it forward (recordPark below), so no label (trusted or not) buys a
+      // fresh budget. It restarts only when the bound fires: the item is then
+      // parked needs-human, which only a human clearing it can undo.
+      const boundApprovedMerge = (why) => {
+        const prev = resumedRecord?.approval;
+        const attempts =
+          (prev !== null && typeof prev === 'object' && Number.isInteger(prev.attempts)
+            ? prev.attempts
+            : 0) + 1;
+        let unrecorded = null;
+        if (attempts < MAX_APPROVED_MERGE_ATTEMPTS) {
+          try {
+            writeParkRecord({ ...resumedRecord, approval: { at: approvalEvent.at, attempts } });
+            return null;
+          } catch (err) {
+            unrecorded = oneLine(err.message);
+          }
+        } else {
+          try {
+            writeParkRecord({ ...resumedRecord, approval: null });
+          } catch {
+            // Best effort: a counter left at the bound only parks sooner.
+          }
+        }
+        consumeApproval();
+        addLabel(ctx, anchor ?? pr, NEEDS_HUMAN_LABEL);
+        const cause =
+          unrecorded === null
+            ? `the approved trust-0 merge of PR #${pr} has not landed after ${attempts} approval tick(s) (bound ${MAX_APPROVED_MERGE_ATTEMPTS}; this tick: ${why})`
+            : `the approved trust-0 merge of PR #${pr} did not land (${why}) and the attempt counter could not be recorded (${unrecorded}) — failing closed`;
+        return summary(
+          'failed',
+          `${cause} — stopped retrying, \`${APPROVED_LABEL}\` consumed, labeled ${NEEDS_HUMAN_LABEL}; merge on GitHub, or fix the cause, clear ${NEEDS_HUMAN_LABEL} and apply \`${APPROVED_LABEL}\` again`,
+        );
+      };
+
       if (decision.merge) {
-        trust.merge(pr, ghOpts);
+        if (approvedMerge) {
+          // Stage 111: the human's trust-0 merge, pinned to the head the
+          // approved verdict examined (GitHub refuses if it moved since the
+          // green reading). A failed merge is reported, never retried here,
+          // and LEAVES the token: the next tick re-verifies head + CI from
+          // scratch (a merge that actually landed closes the PR, so the item
+          // is simply never re-selected — no duplicate merge is possible) —
+          // bounded by boundApprovedMerge (review F6).
+          try {
+            mergePr(ctx, pr, ghOpts, { matchHead: resumedPointer.head });
+          } catch (err) {
+            const bounded = boundApprovedMerge(`GitHub refused the merge: ${oneLine(err.message)}`);
+            if (bounded !== null) {
+              return bounded;
+            }
+            ctx.stderr(
+              `verity-worker: warn: the approved trust-0 merge of PR #${pr} failed: ${oneLine(err.message)} — \`verity:approved\` left in place`,
+            );
+            return summary(
+              'infra',
+              `PR #${pr}: the approved trust-0 merge failed (${oneLine(err.message)}) — \`${APPROVED_LABEL}\` left in place; the next tick re-verifies the head and CI and retries`,
+            );
+          }
+        } else if (reviewMergeResume && resumedPointer !== null) {
+          // A resumed review:merge verdict merging under trust 1/2 is pinned to
+          // the head the resume just verified, exactly as at trust 0.
+          mergePr(ctx, pr, ghOpts, { matchHead: resumedPointer.head });
+        } else {
+          mergePr(ctx, pr, ghOpts);
+        }
+        consumeApproval(); // no-op unless a review:merge resume deferred it
         mergedPrs.push(pr);
         continue; // success → chain: the merged PR may unblock the next stage.
       }
+      // Stage 111 token discipline: approved at trust 0 but CI not green is
+      // the ONE gate that keeps `verity:approved` — the human decision is
+      // made; only CI is outstanding, so the next tick retries the merge
+      // without asking again (bounded, review F6). It posts NO new gate
+      // comment: the pause the label answers must stay the latest bot gate
+      // comment, or the kept label would read as older than its own gate
+      // (review F3) — and a comment per waiting tick is the spam F6 bounds.
+      // Every other re-gate consumes (no-op when a fresh dispatch already did).
+      const keepApproval =
+        approvedMerge &&
+        hasMergeAuthority &&
+        verdict === 'approve' &&
+        pr !== null &&
+        trustLevel === 0 &&
+        green !== true;
+      if (keepApproval) {
+        const bounded = boundApprovedMerge('checks are not green');
+        if (bounded !== null) {
+          return bounded;
+        }
+        const hint = approvalHint({
+          trust: trustLevel,
+          verdict,
+          greenKnown: green,
+          mergeAuthority: hasMergeAuthority,
+          approved: true,
+        });
+        return summary(
+          'gated',
+          `PR #${pr} reviewed, gated at ${gate} — ${decision.reason}; \`${APPROVED_LABEL}\` left in place (no new gate comment)`,
+          gate,
+          { approval_hint: hint },
+        );
+      }
+      consumeApproval();
+      // Stage 111 (ADR-0014 amended): a COMPLETED review with a verdict parks
+      // its result — the approval resumes it at zero cost on an unchanged head.
+      // A resumed result re-parks under the run that produced it and the head
+      // the resume just verified; a fresh one anchors to the head read BEFORE
+      // the review ran (review F2). A verdict about another PR parks nothing
+      // (F11). Every posted pointer is recorded locally first (F1).
+      // Round 3: a resumed verdict's re-park carries its record's pre-dispatch
+      // head-read time (N1b) and attempt counter (N4) forward.
+      let parked = null;
+      let headNote = null;
+      let carriedApproval = null;
+      if (verdict !== null && verdict !== '' && Number.isInteger(pr) && !prMismatch) {
+        if (resumedPointer !== null) {
+          parked = {
+            role: 'review',
+            pr,
+            head: resumedPointer.head,
+            runId: resumedPointer.runId,
+            headReadAt: resumedRecord?.head_read_at ?? null,
+          };
+          carriedApproval = resumedRecord?.approval ?? null;
+        } else {
+          const anchored = reviewParkPointer(ctx, { pr, targetPr, reviewedHead });
+          parked = anchored.parked;
+          headNote = anchored.note;
+        }
+      }
+      parked = recordPark(ctx, parked, { gate, runId, approval: carriedApproval });
+      const hint = approvalHint({
+        trust: trustLevel,
+        verdict,
+        greenKnown: green,
+        mergeAuthority: hasMergeAuthority,
+        approved: false,
+        hasPr: pr !== null,
+        // readParkedPointer never finds a pointer on the local substrate, and
+        // resumeParkedResult refuses an 'unknown' head or a head that moved
+        // during the review: either way the approval cannot resume this
+        // verdict, so the copy must not promise a merge.
+        resumable:
+          parked !== null &&
+          /^[0-9a-f]{6,40}$/.test(parked.head) &&
+          ctx.substrate !== 'local' &&
+          headNote === null,
+      });
       // Stage 36 (issue #91): an `escalate` verdict is an architectural /
       // frozen-contract blocker, distinct from a code-rework request. When the
       // review.escalate_routing kill-switch is ON (default OFF), PARK the work
@@ -1893,20 +2982,32 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
       if (escalateRouting && anchor !== null) {
         addLabel(ctx, anchor, NEEDS_HUMAN_LABEL);
       }
-      const gateReason = escalateRouting
+      let gateReason = escalateRouting
         ? `${decision.reason} — parked for a human (labeled ${NEEDS_HUMAN_LABEL}); resolve via /verity:plan (contract/ADR amendment)`
         : decision.reason;
+      if (approvalRefusal !== null) {
+        gateReason = `${gateReason} — \`${APPROVED_LABEL}\` was not honoured as the merge decision (${approvalRefusal}); apply it again after this comment`;
+      }
+      if (headNote !== null) {
+        gateReason = `${gateReason} — ${headNote}`;
+      }
+      // F11: a verdict naming another PR gates on the PR this review was FOR.
+      const gateOn = prMismatch ? targetPr : (pr ?? gateTarget);
+      const reviewed = prMismatch ? targetPr : pr;
       gatePause(ctx, {
         runId,
         policy,
-        target: pr ?? gateTarget,
+        target: gateOn,
         gate,
-        pending: `review of ${pr === null ? 'the PR' : `PR #${pr}`} completed — ${gateReason}`,
+        pending: `review of ${reviewed === null ? 'the PR' : `PR #${reviewed}`} completed — ${gateReason}`,
+        parked,
+        approval: hint,
       });
       return summary(
         'gated',
-        `${pr === null ? '' : `PR #${pr} reviewed, `}gated at ${gate} — ${gateReason}`,
+        `${reviewed === null ? '' : `PR #${reviewed} reviewed, `}gated at ${gate} — ${gateReason}`,
         gate,
+        { approval_hint: hint },
       );
     }
     // Stage 73 (#202): retirement is the SOLE anti-thrash mechanism. A
@@ -1937,6 +3038,21 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
     }
     // success → chain: re-consult the dependency engine.
   }
+}
+
+// Stage 112: the worker's ONE merge call, around trust.merge (merge authority
+// and the argv — pinned or not — are trust's, unchanged). trust.merge never
+// re-issues a merge whose call failed ambiguously; it re-reads the PR, and a
+// merge GitHub confirms landed comes back `confirmed_by: 'pr-view'` — said on
+// the run log so a merge reported through a timeout is never silent.
+function mergePr(ctx, pr, ghOpts, opts) {
+  const res = opts === undefined ? trust.merge(pr, ghOpts) : trust.merge(pr, ghOpts, opts);
+  if (res?.confirmed_by === 'pr-view') {
+    ctx.stderr(
+      `verity-worker: note: the merge call for PR #${pr} failed ambiguously (it may have landed) and was not re-issued; \`gh pr view\` confirms it MERGED${opts?.matchHead ? ` at the pinned head ${opts.matchHead}` : ''} (stage 112)`,
+    );
+  }
+  return res;
 }
 
 // SUMMARIZE: post the §7 comment (append-only, one per run), write the usage
@@ -2168,11 +3284,16 @@ function runOnce(ctx) {
   // ADR-0011: unattended codex autonomy is refused below tier 2 — before any
   // gh call, scan, label, or lock, exactly like the bad-policy refusal above.
   assertContainmentTier(policy, resolveEffectiveAgent(policy));
+  locateLedger(ctx); // stage 112: an unlocatable ledger refuses the run (infra) — never read as zero
   prepareLedger(ctx); // stage 108: seed the git-dir ledger once, before the daily-limit check reads it
   const checks = startupChecks(ctx, policy); // the rest of §4.1: daily limits, auth, identity, breaker
   if (!checks.ok) {
     throw new WorkerError(checks.message, checks.slug);
   }
+  // Stage 111 review F1: the bot identity rides the run context — a parked
+  // pointer is honoured only from a gate comment this login authored (null ⇒
+  // none is: the local substrate, or an identity the lookup could not name).
+  ctx.botLogin = checks.botLogin ?? null;
 
   const runId = makeRunId();
   // The scanner's P5 tier yields nothing for a GATED decision, so a repository
@@ -2454,10 +3575,13 @@ if (require.main === module) {
 
 module.exports = {
   APPROVAL_ACTION,
+  approvalHint,
   CIRCUIT_LABEL,
   ERROR_SLUGS,
   EXIT_CODES,
+  GATE_COMMENT_PREFIX,
   GATE_LABEL,
+  MAX_APPROVED_MERGE_ATTEMPTS,
   MAX_REPEAT_DISPATCHES,
   NEEDS_HUMAN_LABEL,
   OUTCOME_BADGES,
@@ -2476,12 +3600,24 @@ module.exports = {
   formatRunSummary,
   performResultEffects,
   gateNameFor,
+  judgeApprovalEvent,
+  latestGatePause,
   main,
   makeRunId,
+  parkRecordMismatch,
+  parkRecordPath,
+  parseGatePause,
   parkedResultPointer,
   parseWorkerArgs,
+  prHeadRead,
   prHeadSha,
+  pushesSince,
+  PUSH_EVENTS,
+  readParkRecord,
   readParkedPointer,
+  readTimeline,
+  TIMELINE_MAX_PAGES,
+  TIMELINE_PER_PAGE,
   recheckApprovedCarrier,
   recordUsage,
   resumeParkedResult,

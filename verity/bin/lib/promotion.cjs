@@ -962,7 +962,7 @@ function buildPrBody(manifest, tree, dev) {
 // Returns the result envelope in all outcome cases, like project()/verify().
 function propose(version, opts = {}) {
   const cwd = path.resolve(opts.cwd || process.cwd());
-  const ghRun = opts.gh || ((args) => gh.run(args));
+  const ghRun = opts.gh || ((args, ghOpts) => gh.run(args, ghOpts));
   const result = {
     schema: 1,
     version: String(version),
@@ -1166,20 +1166,24 @@ function propose(version, opts = {}) {
     const prBody = buildPrBody(manifest, result.tree, dev);
     let prOut;
     try {
-      prOut = ghRun([
-        'pr',
-        'create',
-        '--repo',
-        cfg.prod_repo,
-        '--base',
-        prodDefaultBranch,
-        '--head',
-        result.branch,
-        '--title',
-        `Promote Verity v${version}`,
-        '--body',
-        prBody,
-      ]);
+      // Stage 112: a create is never retried after an ambiguous failure.
+      prOut = ghRun(
+        [
+          'pr',
+          'create',
+          '--repo',
+          cfg.prod_repo,
+          '--base',
+          prodDefaultBranch,
+          '--head',
+          result.branch,
+          '--title',
+          `Promote Verity v${version}`,
+          '--body',
+          prBody,
+        ],
+        { idempotent: false },
+      );
     } catch (err) {
       throw new PromotionError(`gh pr create failed: ${err.message}`, EXIT_INFRA);
     }
@@ -1538,7 +1542,7 @@ function stampRuntimeTruth(statusLib, cwd, version, deployedAt) {
 // propose().
 function finalize(version, opts = {}) {
   const cwd = path.resolve(opts.cwd || process.cwd());
-  const ghRun = opts.gh || ((args) => gh.run(args));
+  const ghRun = opts.gh || ((args, ghOpts) => gh.run(args, ghOpts));
   const result = {
     schema: 1,
     version: String(version),
@@ -1820,17 +1824,11 @@ function finalize(version, opts = {}) {
     // --- the GitHub Release (gh, injectable) --------------------------------
     const releaseBody = buildReleaseBody(manifestText, manifest, dev);
     try {
-      ghRun([
-        'release',
-        'create',
-        tag,
-        '--repo',
-        cfg.prod_repo,
-        '--title',
-        tag,
-        '--notes',
-        releaseBody,
-      ]);
+      // Stage 112: a create is never retried after an ambiguous failure.
+      ghRun(
+        ['release', 'create', tag, '--repo', cfg.prod_repo, '--title', tag, '--notes', releaseBody],
+        { idempotent: false },
+      );
     } catch (err) {
       if (err instanceof PromotionError) {
         throw err;

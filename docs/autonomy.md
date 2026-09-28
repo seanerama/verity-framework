@@ -88,7 +88,7 @@ reports a verdict.
 
 | `review.trust` | After a review verdict of "approve" |
 | --- | --- |
-| `0` (default) | Never merges. Gates at `review:merge`; a human merges the PR. Enable branch protection ("require 1 review") as the backstop. |
+| `0` (default) | Never merges on its own. Gates at `review:merge`; the human decides. Applying `verity:approved` to that gate **is** the merge decision (stage 111, ADR-0014 amended): the next tick resumes the parked verdict and merges only if it is `approve`, the PR head is still the one the review examined, the label was applied after the gate comment by a human account (not the bot; one listed in `humans:` if set), and checks are verified green (zero new model runs, merge pinned to the reviewed head). Or merge the PR yourself on GitHub. Enable branch protection ("require 1 review") as the backstop. |
 | `1` | Auto-merges only **low-risk** PRs: every changed file matches `low_risk.allowed_paths`, none matches `protected_paths` (a protected hit always vetoes), `additions+deletions ≤ max_changed_lines`, and checks are green when `require_ci_green`. Everything else gates. |
 | `2` | Merges any approved PR with green checks. |
 
@@ -104,7 +104,7 @@ The review role reports a verdict; the worker's deterministic code routes it.
 | --- | --- | --- |
 | `approve` | The trust ladder above (may merge, may gate) | Only per the ladder |
 | `request_changes` | Gates at `review:merge`; hand back to `/verity:build` | Never |
-| `escalate` | Gates at `review:merge`. With `review.escalate_routing: true` it also **parks the work item** (`verity:needs-human`) and names `/verity:plan` for a contract/ADR amendment | Never |
+| `escalate` | Gates at `review:merge`. With `review.escalate_routing: true` it also **parks the work item** (`verity:needs-human`) and names `/verity:plan` for a contract/ADR amendment | Never (not even with `verity:approved`) |
 | unknown / absent | Gates at `review:merge` (fail-closed) | Never |
 
 `review.escalate_routing` defaults **false** (dark-launched): while off, an
@@ -142,9 +142,147 @@ When a run hits a human gate, the worker:
 
 To approve, **apply the label `verity:approved`**. The next tick picks approved
 items up first (P1), removes both labels (the token is single-use), and
-continues. At trust 0 a `review:merge` gate still ends with a human pressing the
-merge button — the approval label resumes the worker, it does not grant merge
-authority.
+continues.
+
+### Approving a `review:merge` gate (stage 111, ADR-0014 amended)
+
+A `review:merge` gate after a completed review **parks the review's result**,
+exactly like the `unknown-cost` gate below: the ⏸️ comment carries a
+``parked: role `review` result of run … at PR #N head <sha>`` line, where
+`<sha>` is the PR head read **before** the review ran — the head the verdict
+examined. Applying `verity:approved` then **resumes that verdict** instead of
+buying a new review. If the head moved while the review ran, the review may
+have read either head, so **no** pointer is recorded: an approval buys a fresh
+review, even if the branch is later force-pushed back to the old head.
+
+The worker trusts that pointer only when (stage 111 review):
+
+- the ⏸️ comment was written by the worker's own bot account (a comment anyone
+  else posts in the same format is ignored; with no known bot identity nothing
+  is resumed), and
+- it matches the park record the worker wrote on its own host when it posted
+  it — `~/.verity/logs/<run>/park.json` (run id, PR, head, gate, bot login,
+  the GitHub time of the pre-review head read, the retry counter; no
+  secrets). An edited comment, or one naming a run this host never parked,
+  does not match, and the approval buys a fresh review instead, and
+- for an `approve` verdict (any trust), the PR's timeline shows **no push**
+  since the review read its head: no `head_ref_force_pushed`,
+  `head_ref_restored`, `head_ref_deleted` or `committed` event (nor
+  `base_ref_force_pushed` / `base_ref_changed`, if GitHub serves them) at or
+  after that read. The read's time is GitHub's own `updatedAt` from the same
+  `gh pr view` that read the head, compared with GitHub's `created_at` on the
+  events, so the worker host's clock plays no part. `committed` events carry
+  only git dates, which the pusher sets, so they are a secondary signal. A head
+  that goes back to the reviewed SHA always needs a force-push, which GitHub
+  timestamps itself. A push found this way is treated like a moved head: a
+  loud fresh review. A park recorded before this check existed (no read time)
+  also re-reviews. If the PR's timeline cannot be read, the tick does not
+  merge: the verdict re-gates at zero cost and says why.
+
+At trust 0 the label itself is also checked, from the item's timeline: its
+latest `labeled` event must be **newer than that gate comment**, by an account
+that is **not the worker's bot**, and — when `humans:` is set — by a login
+**listed in `humans:`**. A label that fails any of these (applied before or
+while the gate was posted, applied by the bot, applied by a triage-only
+account or integration) does not merge: the parked verdict re-gates at zero
+cost, the label is consumed, and the new gate comment says why. Apply the
+label again after that comment. If the timeline cannot be read, the tick
+re-gates the same way. In a single-account setup (operator and bot are the
+same login) the label never merges; merge on GitHub.
+
+What the approval then does:
+
+- **Head unchanged** → zero new model runs; the summary says `resumed:`.
+  - At trust 0 with an `approve` verdict and verified-green checks, the tick
+    **merges** (`gh pr merge --squash --match-head-commit <sha>`, so GitHub
+    refuses if the branch moved after the green reading). The label is
+    consumed by the merge.
+  - At trust 0 with an `approve` verdict but checks **not** green, it
+    **leaves `verity:approved` in place** and posts only its run summary (no
+    new gate comment) — the next tick retries the merge once CI is green,
+    without asking you again.
+  - Any other verdict (`request_changes`, `escalate`, unknown) re-gates at zero
+    cost. Approval never overrides a verdict, and never lowers a trust-1 risk
+    refusal. At trust 1/2 a resumed `approve` verdict re-runs the ladder, which
+    may merge it (low risk and green at trust 1; green at trust 2).
+  - A merge that GitHub refuses (conflict, protection, moved head) ends the
+    tick as `infra` with the reason and leaves the label; the next tick
+    re-verifies from scratch.
+  - Retries are bounded: after **3** approval ticks for the same parked
+    verdict that could not land the merge (CI still not green, or GitHub
+    refused), the worker stops, consumes the label and parks the item
+    `verity:needs-human` without another gate comment. Applying the label again
+    does not restart the count, and neither does a refused label's re-gate.
+    Only the `verity:needs-human` park resets it. Fix the cause, clear
+    `verity:needs-human` and apply `verity:approved` again, or merge on
+    GitHub.
+- **Head moved** (including a push that landed while the review ran, or any
+  push since the review read the head, even one that put the reviewed SHA
+  back), pointer unreadable or unmatched, or parked file gone → a loud
+  `repurchase:` fallback to a fresh review at full price. The fresh verdict
+  gates again for you, so the approval never merges a head that no review
+  examined and no human saw the verdict for.
+- A review verdict that names a PR other than the one the review was
+  dispatched for is never acted on: it gates with no pointer, on the PR the
+  review was dispatched for. Its findings comment is posted there too, never
+  on the PR the model named.
+- An `unknown-cost` approval consents to the **cost** only: the resumed review
+  then parks at `review:merge`, and merging takes a second approval.
+
+The local substrate has no comment trail, so there is no pointer and an
+approval there always buys a fresh review (which re-gates).
+
+The ⏸️ comment's `approve:` line for a `review:merge` gate is always true for
+its configuration:
+
+| Configuration | `approve:` line |
+| --- | --- |
+| trust 0, `approve`, checks green (or not read) | apply label `verity:approved` from a human account (never the worker's bot; one listed in `humans:` if set) — the next tick merges when CI is green (zero new model runs) |
+| trust 0, `approve`, no resumable pointer (head unreadable, or the local substrate) | merge the PR yourself, or apply `verity:approved` to re-review at full price — this park has no resumable pointer, so an approval cannot merge |
+| trust 0, `approve`, checks not green | CI is not green; apply `verity:approved` once it is, from a human account (never the worker's bot; one listed in `humans:` if set), or merge on GitHub |
+| trust 0, `approve`, approved but checks not green (label kept; run summary only) | `verity:approved` stays applied — the next tick merges once CI is green (zero new model runs), or merge on GitHub |
+| trust 0, `approve`, the head moved while the review ran | the no-resumable-pointer line below; the gate reason names the moved head |
+| `request_changes` (any trust) | the review asked for changes: push a fix (new head) and apply `verity:approved` to re-review, or merge on GitHub; approving the unchanged head re-gates at zero cost |
+| `escalate` (any trust) | architectural / frozen-contract blocker: resolve via /verity:plan; approval does not merge |
+| provider without merge authority (ADR-0031) | merge on GitHub; a verdict from this runtime never merges |
+| trust 1, `approve` | merge on GitHub, or apply `verity:approved` to re-run the trust ladder on this approve verdict at zero cost — at trust 1 it merges only a low-risk PR with green checks; an approval never overrides the risk classification |
+| trust 2, `approve`, checks not green | CI is not green; apply `verity:approved` once it is to re-run the trust ladder on this approve verdict at zero cost — it merges if checks are green by then (or merge on GitHub) |
+| unknown / absent verdict | re-review (absent: a fresh review at full price) or merge on GitHub |
+| any non-`approve` verdict, or trust 1/2 `approve`, with no resumable pointer | the same copy, but ending "this park has no resumable pointer, so any approval re-reviews at full price" (never "re-gates at zero cost") |
+| `approve` verdict that named no PR | merge on GitHub; the approve verdict named no PR, so Verity cannot act on it — an approval only buys a fresh review at full price |
+
+What the label *does* in each row is decided once, by
+`trust.approvalConsequence`; the `approve:` line only words it. The same
+decision is what `verity operator act approve` reports (below), so the gate
+comment and the act verb never disagree.
+
+#### `verity operator act approve` — `effect.consequence` (operator-act v2, ADR-0037)
+
+`verity operator act approve <n>` applies `verity:approved` and nothing else:
+no verb merges (the frozen act contract, now
+[`contracts/operator-act-v2.md`](../contracts/operator-act-v2.md) — v1's "trust 0
+never merges" sentence described the ladder of its day and is superseded). The
+**worker** is the sole merge path. Since 1.7.0 the verb's JSON also reports what
+the worker's next tick will do with the label, as `effect.consequence`:
+
+| `consequence` | When |
+| --- | --- |
+| `merge-when-green` | trust 0, parked `approve` verdict, PR head unchanged, and the label's latest `labeled` event is newer than the gate comment, by a non-bot account (listed in `humans:` if set) — the next tick merges once CI is green (zero new model runs) |
+| `resume` | a parked non-`approve` verdict re-gates at zero cost |
+| `re-review` | the head moved, the PR was pushed to since the review read its head (`approve` verdicts), the pause recorded no pointer or head (or its record has no head-read time), the pointer does not match its park record, or the parked result carries no verdict — a fresh review at full price |
+| `gate` | the label cannot advance the item: verdict `escalate`, a review runtime without merge authority (ADR-0031), or (trust 0) a label the worker will not honour — applied before the gate comment, by the bot, or by an account not in `humans:` |
+| `unknown` | an input could not be read — the policy, the gate-comment trail, the PR's or the item's timeline, the PR head, the park record or parked result (both live under the worker host's `~/.verity/logs`), the local substrate (no comment trail); no gate comment could be authenticated against a park record on this host; the item's latest gate is not a `review:merge` park; or trust 1/2 with an `approve` verdict (the ladder may merge on inputs the verb does not read). Never a guess. |
+
+The act verb does not know the worker's bot login; it learns it from the
+worker host's park records (the author of a ⏸️ comment whose pointer matches a
+record naming that author). Run it on the worker host, or expect `unknown`.
+The prediction's reads are read-only and bounded by `gh`'s per-call timeout,
+taken only after the label write succeeds; a failed write reports no
+consequence. The `reason` string names the consequence. Checks are not read:
+no value depends on them.
+
+Other gates (`ci:unverified`, `unknown-cost`, role-declared) keep the plain
+``apply label `verity:approved` `` line — there the label does advance the item.
 
 > In v1 **the label is the only approval token the worker honors** — under the
 > Actions driver a comment *wakes* the worker promptly (the workflow triggers on
@@ -368,11 +506,16 @@ you ship any other change (for example, on a branch through a reviewed PR). The
 commit is built from `HEAD`'s `.gitignore` plus the ignore line, so unrelated
 `.gitignore` edits you have not committed are never included, and no git hooks
 run. Your working `.gitignore` is refreshed only if you had not changed it. It
-refuses, with `ok: false` and exit 1, while a merge, cherry-pick, revert or
-rebase is in progress. Until the change is merged, the tracked file is stale
+refuses, with `ok: false` and exit 1, while a merge, cherry-pick, revert,
+rebase, cherry-pick/revert sequence (`sequencer/`) or bisect (`BISECT_LOG`) is
+in progress. Until the change is merged, the tracked file is stale
 history: nothing writes to it and only `recover` reads it.
 
 `recover` writes only the live ledger and never changes the in-tree file. It
+writes a temporary file beside the ledger and renames it into place. Just
+before the rename it reads the live ledger again and keeps any row a worker
+appended in the meantime, and a `recover` killed mid-write leaves the previous
+ledger intact. It
 reports `path`, `commits_scanned`, `tree_rows` (rows in the in-tree file),
 `rows_before`, `rows_added` and `rows_after`. A second run adds nothing. A
 commit whose ledger cannot be read is skipped and counted (`commits_skipped`),
@@ -388,7 +531,28 @@ accordingly.
 
 The worker reads the same ledger at startup: if today's totals already exceed
 `limits.max_usd_per_day` or `limits.max_runs_per_day`, it refuses to start
-(exit 30 `daily-limit`) until the UTC day rolls over. `est_usd` is **verified**
+(exit 30 `daily-limit`) until the UTC day rolls over.
+
+**A ledger that cannot be located is a refusal, never an empty ledger** (stage
+112). The in-tree fallback (`.verity/usage.csv`) is used only when git says the
+directory is **not a git repository**, or when no `.git` exists anywhere above
+it. Any other git failure inside a repository throws instead of falling back:
+a `safe.directory` "detected dubious ownership" refusal (cron or a console
+running as another user, containers), a malformed config, a timeout, or a
+missing `git` binary. Falling back there would make that process read a stale
+or empty file while every other process uses the git-dir ledger, and the daily
+breaker would under-read. Instead:
+
+- the worker refuses the run before the daily-limit check, before any GitHub
+  call and before any dispatch: `verity-worker: 30 ledger-path: cannot locate
+  the usage ledger: …`, naming git's error;
+- `verity usage`, `verity usage recover`, `verity usage untrack`,
+  `verity operator runs|run|usage` fail with a non-zero exit and the same message;
+- `verity operator snapshot` reports the ledger-derived fields as `null`
+  (unknown), as it already does for an unreadable ledger.
+
+Fix the git error (for dubious ownership: `git config --global --add
+safe.directory <repo>` for the user the worker runs as) and run again. `est_usd` is **verified**
 spend — runs whose cost the runtime never reported are counted separately as
 `unknown_cost_runs` and never summed as $0 (see [Limits](#limits)).
 
@@ -459,7 +623,8 @@ show. Since 1.6 every `gh`/`git` subprocess on the worker path is killed
 
 | call | deadline | on timeout |
 |---|---|---|
-| `gh` (labels, comments, PRs, issues, merges, reads) | 60 s per attempt | retried like any transient failure (below), then fails loud |
+| `gh` reads and label adds/removes | 60 s per attempt | retried like any transient failure (below), then fails loud |
+| `gh` writes that are not idempotent (comments, lock/unlock lines, issue and PR creates, merges) | 60 s per attempt | **never retried** — the write may have landed; resolved as described below (stage 112) |
 | `git fetch` / `pull` / `push` / `clone` / `ls-remote` | 5 min | `ok:false`, reason `timeout` — the same fail-closed refusal a failed push gets |
 | every other `git` (status, commit, checkout, rev-parse…) | 60 s | as above |
 
@@ -475,6 +640,43 @@ names the class. HTTP 4xx and everything else still fail fast. Set
 stderr (the benchmark harness turns it on for every tick). The status reads
 behind `verity state`/`operator snapshot` are bounded the same way; a read that
 times out is reported as `network` under [Unreadable state](#unreadable-state).
+
+**A timeout never duplicates a write** (stage 112). A write that timed out may
+still have reached GitHub, so retrying it can apply it twice: a doubled run
+summary used to read as two runs to the no-progress breaker, and a retried merge
+that had landed was reported as a failed merge. The retry policy therefore
+depends on whether the call is idempotent:
+
+| failure | idempotent call (reads, label add/remove, label edit) | non-idempotent write (comment, lock line, issue/PR/release create, merge) |
+|---|---|---|
+| **pre-connect**: `network is unreachable`, `no such host`, `EAI_AGAIN`, `could not resolve host`, `connection refused`, secondary rate limit | retried | retried (the request never reached GitHub) |
+| **ambiguous**: killed at the deadline (`timeout`), `i/o timeout`, `connection reset`, `TLS handshake timeout`, HTTP 5xx | retried | **not retried**: fails at once with `ambiguous: true` |
+
+What each write does after an ambiguous failure:
+
+- **Merge** (`trust.merge`, every worker merge path): re-reads
+  `gh pr view --json state,mergedAt,mergeCommit` (plus `headRefOid` for a
+  head-pinned merge). If GitHub reports the PR `MERGED` (at the pinned head,
+  when pinned), the merge counts as done and the run log says it was
+  `confirmed by gh pr view`. Otherwise the original error stands. The merge is
+  never issued a second time.
+- **Lock acquire**: re-reads the lock trail. If our exact `lock:<run-id>` line is
+  there, the lock is held; otherwise the original error stands.
+- **PR create**: runs `gh pr list --head <branch>`. GitHub allows one open PR per
+  branch, so a PR found there is adopted.
+- **Issue create** (work-item reconcile): there is no safe key to read it back,
+  so the stage's create fails loudly (`work-item-reconcile-failed … may exist;
+  not re-created`). The next reconcile lists the issue if it did land.
+- **Run summary, findings comment**: best effort as before. One stderr warning,
+  no retry.
+- **Unlock line**: reported like any failed unlock and never re-posted (a
+  doubled `outcome:failed` line would count as two strikes).
+
+The no-progress breaker also counts **distinct runs** (run id plus roles), not
+comment copies, so a duplicated summary from any cause cannot trip
+`MAX_REPEAT_DISPATCHES`. The interactive `verity review merge` has never
+retried its merge: a timeout there is reported as a failed merge, so check the
+PR on GitHub before you run it again.
 
 ## Unverified CI
 
