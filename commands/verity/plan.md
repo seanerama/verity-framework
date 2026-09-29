@@ -29,19 +29,46 @@ a feature-assessment, and a linked GitHub work-item.
 
 2. Capture the request: a GitHub feature-issue, a `docs/handoff/` brief, a user ask,
    or a catalog feature (`verity feature show <id>`).
+   **When the request names a spec file, read THAT file first — it is the request text.**
+   A request filed by `verity init` is a pointer: its entry in `.verity/intake.json`
+   carries the path in `spec` (and the commit in `spec_commit`), the issue body or
+   the local record title names the same path (e.g. `docs/spec.md`). Plan from the
+   file's content; never paste it back into the issue.
 
-3. **VERIFY AGAINST THE LIVE CODEBASE** (mandatory anti-hallucination step). Build a
+3. **Spec soundness (init-registered requests)** — before decomposing, judge whether
+   the spec is buildable. Assess six things: the **goal**, the **users**, the **core
+   flows**, the **data kept**, the **constraints**, and what **"done"** looks like.
+   Record the assessment in `feature-assessments/<slug>-spec-assessment.md` either way.
+   **Never guess:** an architecture, data model, user or success criterion the spec
+   does not imply is a GAP, not a decision for you to make.
+   - **Unsound** ⇒ STOP. Write NO stage files. Report the gaps as the last line of
+     your final message, one gap per line inside `reason` (separate them with `\n`):
+     `{"verity":1,"outcome":"gated","gate":"spec-unsound","reason":"<one gap per line>"}`
+     Name gaps a human can act on ("no data model for orders", "success criterion
+     missing") — never a rewrite of the spec. The worker parks the request
+     `verity:needs-human` with your gaps; the operator amends the spec, clears the
+     park (`verity operator act clear-needs-human <n>`), and the next tick plans again.
+     The engine commits nothing for a parked plan: the gaps travel in the marker.
+   - **Sound** ⇒ continue to Mode A below (a thin first slice, skeleton first). The
+     skeleton stage defines `.verity/gates.json` — the gate definition `verity init`
+     deliberately did not fabricate.
+
+   This step is REQUIRED — and the marker contractual — for a request whose number
+   `.verity/intake.json` lists (filed by `verity init`). For any other request run the
+   same assessment (SHOULD), but the marker is not required.
+
+4. **VERIFY AGAINST THE LIVE CODEBASE** (mandatory anti-hallucination step). Build a
    claim/reality table — confirm the request's assumptions hold against actual source
    before planning. Do not build on false premises.
 
-4. Impact + contract-safety analysis. Does it need a NEW contract, or threaten a
+5. Impact + contract-safety analysis. Does it need a NEW contract, or threaten a
    frozen one? Default additive.
    - New seam → `verity contract new <name>`.
    - Architecture-affecting → `verity adr new "<decision>"` + confirm-gate with the user.
 
-5. Decide: ACCEPT as a stage / SPLIT into several / DEFER / REJECT.
+6. Decide: ACCEPT as a stage / SPLIT into several / DEFER / REJECT.
 
-6. Write the stage spec (acceptance conditions are pre-filled by type — kill-switch +
+7. Write the stage spec (acceptance conditions are pre-filled by type — kill-switch +
    UI-smoke for features, regression test for bugs, exit-state for chores):
    ```bash
    verity stage new "<title>" --type feature|bug|chore [--depends-on N,M]
@@ -49,7 +76,7 @@ a feature-assessment, and a linked GitHub work-item.
    Fill Objectives / What to build / Interface contracts. Record the reasoning in
    `feature-assessments/<slug>-assessment.md` (and an ADR if the decision is architectural).
 
-7. Register the work-item for traceability (issue ↔ stage ↔ future PR) **if you have GitHub
+8. Register the work-item for traceability (issue ↔ stage ↔ future PR) **if you have GitHub
    access** — use the suggested title/labels from `stage new`:
    ```bash
    gh issue create --title "[stage N] <title>" --label <type> --body "...refs stage N..."
@@ -65,12 +92,12 @@ a feature-assessment, and a linked GitHub work-item.
    > returns. When you DO have `gh` access (e.g. Claude), running the command above is fine —
    > the worker reconcile is idempotent and will not duplicate.
 
-8. Hand the stage instruction + contracts to the Stage Manager (/verity:build).
+9. Hand the stage instruction + contracts to the Stage Manager (/verity:build).
    In headless runs the engine commits your artifacts after you return (ADR-0033);
    interactively, commit them yourself.
 
 **Mode A (initial decomposition) — plan ONLY the first buildable slice, not the
-whole architecture.** Run steps 3–7 as a batch over the architecture, but bound
+whole architecture.** Run steps 4–8 as a batch over the architecture, but bound
 the output: emit the **first buildable slice — typically 3–5 dependency-ordered
 stages, skeleton-first** (a bootable app skeleton as an early stage). Do this **even
 when the spec or architecture implies many stages (e.g. an "8–12 stage build")** —

@@ -436,7 +436,7 @@ on stderr, and an idle tick reads
 bare "no eligible work". Diagnostics only — the skipped issues are never
 commented on.
 
-If you see that note, you have two supported paths:
+If you see that note, you have three supported paths:
 
 - **Use a second account** — the [bot-account setup](#bot-account-setup) above.
   Requests you file from your human account are then eligible; the worker's
@@ -444,6 +444,76 @@ If you see that note, you have two supported paths:
 - **Hand-seed stages instead of requests** — `verity stage new "<title>"`
   (what the canary runs did). Stage files need no author at all: the P5
   dependency engine picks them up regardless of login.
+- **Let `verity init` file the request** — a request `verity init` filed is
+  listed in `.verity/intake.json` and is eligible under the same login
+  ([operator-init contract](../contracts/operator-init.md), ADR-0038). That
+  committed intake register is the only exception to the rule: the scanner
+  keeps a bot-authored `verity:request` only when its number is listed in the
+  register **committed on the default branch** (`origin/HEAD`), never a
+  working-tree copy. `origin/HEAD` must be a symbolic ref into
+  `refs/remotes/origin/` (what `git clone`, `git remote set-head` and
+  `verity init` write); one that points at a local branch, or is not symbolic,
+  trusts nothing and prints one warning. Listing a number means landing an edit
+  to `.verity/**` on the default branch — a forced protected path that gates
+  for a human at trust 0 and 1 — so, provided the local ref store is intact, a
+  role cannot enrol its own request. A role able to write `.git/` directly is
+  outside this guarantee, as it already is for hooks. When an entry is accepted
+  the note carries both counts:
+  `skipped N self-authored request(s), accepted M engine-registered (see docs/autonomy.md)`.
+  A register that cannot be read, or fails its schema, trusts nothing and
+  prints one warning. A project without a register behaves exactly as before.
+
+There is still no bypass knob: no policy key trusts bot-authored requests in
+general; only the enumerated, committed register entries are eligible.
+
+`verity operator snapshot` shows pending intake: `queue.requests_pending` and
+`queue.requests_parked` count OPEN `verity:request` items (split on
+`verity:needs-human`; `null` when GitHub was not observed), and when no stage
+has a next action but a request is pending, `next` is the worker's own P4 step,
+`plan` on the lowest-numbered pending request (the human render reads
+`waiting to be planned (N request(s) pending)`). The counts are as labelled:
+they do not re-apply the self-authored filter above.
+
+### Spec-soundness gate (stage 115, ADR-0038 D4)
+
+Before it decomposes a request `verity init` filed, the plan role judges
+whether the spec is buildable: goal, users, core flows, the data kept,
+constraints, and what "done" looks like. An architecture the spec does not
+imply is a gap, never a decision the role makes for you. When the spec is not
+buildable the role writes no stage file and reports
+`{"verity":1,"outcome":"gated","gate":"spec-unsound","reason":"<one gap per line>"}`.
+
+**What parks.** The worker labels the request `verity:needs-human`, not
+`verity:awaiting-approval`: approving would only run the same plan on the same
+spec. `verity:request` stays on, no strike is counted (the park also resets
+the no-progress count), and the engine commits nothing for that run. Any other
+gated result, and a sound spec, go exactly the way they went before.
+
+**What the comment looks like** (github):
+
+```
+⏸️ **verity-worker** `<run-id>` — paused at human gate `spec-unsound`
+pending: request #<n> — the plan role judged the spec not buildable as written; …
+
+## Spec gaps
+- no data model for orders
+- success criterion missing
+
+amend `docs/spec.md`, then `verity operator act clear-needs-human <n>` — the next tick re-plans
+```
+
+Each gap is passed through the secret redactor before it is posted. On the
+local substrate there is no comment: the park is the record's label (its
+commit subject ends `(spec-unsound)`) and the gaps are printed to the run log.
+The run's usage rows carry gate `spec-unsound`.
+
+**How to resume.** Amend the spec, then clear the park
+(`verity operator act clear-needs-human <n>`, or the Console's clear control).
+The next tick selects the request again and plans it. A sound spec goes straight
+to the thin first slice (Mode A).
+`verity operator gates` lists the park as a `spec-unsound` gate with
+`allowed_actions: ["clear-needs-human"]` and the gaps in `gaps[]` (`[]` on
+local), and `snapshot.queue.requests_parked` counts it.
 
 ## Usage & cost tracking
 

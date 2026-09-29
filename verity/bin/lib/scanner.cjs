@@ -12,6 +12,11 @@
 //     botLogin     — the bot's GitHub login. P4 hard rule: skip items where
 //                    author.login == botLogin (no self-feeding). When absent,
 //                    no P4 author filtering happens (the worker MUST pass it).
+//                    Stage 114 (ADR-0038 D2): the ONE exception is a request
+//                    whose number the intake register committed on the
+//                    default branch lists (intake.registeredNumbers(opts.cwd),
+//                    kind 'issue') — engine-filed intake, e.g. `verity init`.
+//                    No knob: without a register the set is empty.
 //     warn         — `(message) => void`, DEFAULT silent (the usage.cjs
 //                    opts.warn precedent — a library never writes to a stream
 //                    uninvited). Called ONCE per scan, with the skipped count,
@@ -21,6 +26,11 @@
 //                    plain "no eligible work". Diagnostics only — the caller
 //                    decides where it surfaces (the worker: stderr + the idle
 //                    line); it never becomes a GitHub comment.
+//                    Stage 114: when a register entry is accepted the note
+//                    carries both counts (`skipped N …, accepted M
+//                    engine-registered`); an unreadable/invalid register adds
+//                    ONE warning (before the note) — only ever read when a
+//                    self-authored request exists.
 //     isLocked     — injectable lock predicate `(item) => boolean`. Items for
 //                    which it returns true are skipped in every tier. DEFAULT:
 //                    () => false (no filtering). This is the seam for the §4.3
@@ -54,6 +64,9 @@ const next = require('./next.cjs');
 // tiers filter the SAME label vocabulary over the same carrier the rest of the
 // engine reads. github/absent: byte-identical gh queries (spawn-arg pinned).
 const substrateLocal = require('./substrate-local.cjs');
+// Stage 114 (ADR-0038 D2): the committed intake register — the ONE provenance
+// signal that makes a self-authored P4 request eligible.
+const intake = require('./intake.cjs');
 
 const NEEDS_HUMAN_LABEL = 'verity:needs-human';
 
@@ -226,10 +239,35 @@ function scan(opts = {}) {
       // The no-self-feeding rule itself is untouched (a worker that feeds
       // itself work is the runaway the tiers exist to prevent) — but the drop
       // must not be silent (stage 28): say how much was filtered, once.
+      // Stage 114 (ADR-0038 D2): a self-authored request is KEPT iff its
+      // number is in the intake register COMMITTED on the default branch
+      // (intake.cjs — never the working tree). Read lazily, only when a
+      // self-authored request exists, so a scan with none spawns nothing new;
+      // a project without a register has the empty set (byte-identical).
+      const isSelf = (it) => (it.author || '').toLowerCase() === botLogin;
+      let registered = null;
+      if (items.some(isSelf)) {
+        registered = intake.registeredNumbers(opts.cwd, { kind: 'issue', warn });
+      }
       const before = items.length;
-      items = items.filter((it) => (it.author || '').toLowerCase() !== botLogin);
+      let accepted = 0;
+      items = items.filter((it) => {
+        if (!isSelf(it)) {
+          return true;
+        }
+        if (registered.has(it.number)) {
+          accepted += 1;
+          return true;
+        }
+        return false;
+      });
       const skipped = before - items.length;
-      if (skipped > 0) {
+      if (accepted > 0) {
+        warn(
+          `skipped ${skipped} self-authored request(s), accepted ${accepted} engine-registered (see docs/autonomy.md)`,
+        );
+      } else if (skipped > 0) {
+        // No register entry matched: the stage-28 note, byte-identical.
         warn(`skipped ${skipped} self-authored request(s) (no self-feeding; see docs/autonomy.md)`);
       }
     }

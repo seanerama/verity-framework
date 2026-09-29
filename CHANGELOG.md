@@ -2,6 +2,127 @@
 
 ## [Unreleased]
 
+## 1.8.0
+
+### Added
+
+- **`verity init`: create a project from a spec file with no chat session
+  (stage 113, ADR-0038, dev#304).** `verity init <path> --spec <file> --name
+  <name> --owner <owner> [--slug] [--substrate github|local]
+  [--private|--public] [--start] [--gate <name>=<command>]… [--json]` runs the
+  new frozen contract `contracts/operator-init.md` v1 on both substrates:
+  identity, scaffold, the spec copied to `docs/spec.md`, `.verity/gates.json`
+  only from `--gate` (otherwise the step is reported skipped), a starter
+  policy (`supervised`, trust 0, `allow_with_token_limit`), git, the remote
+  (`gh repo create`, private by default, or a local bare origin), labels, a
+  `verity:request` intake that points at the spec, and the intake register
+  `.verity/intake.json`, committed and pushed before the verb reports `ok`.
+  The intake carries `verity:circuit-open` unless `--start`, so nothing runs
+  until `operator act circuit close <n>`. Preflight refuses with zero effects
+  (exit `2`); a failed step ends the step list with `null` for everything not
+  established (exit `1`); an ambiguous `gh repo create` / `gh issue create` is
+  read back, never re-sent. It is a new verb only: no existing verb, the
+  worker, the scanner and `benchmark provision` are unchanged (stage 114,
+  below, makes the scanner read the register). Preflight also refuses, under the existing
+  reason tokens: a control character or U+2028/U+2029 in `--name`, `<path>`,
+  `--gate` or the spec's title line (`invalid-name` / `invalid-path` /
+  `invalid-gate` / `spec-unreadable`), which would otherwise inject code into
+  the scaffolded gate runner; a spec, `--name` or `--gate` carrying a credential-shaped string (the production secret-scan shapes, not keyword prose; contract invariant 9), a spec
+  that is not a regular file (FIFO, device, directory, also through a
+  symlink) or one over 1 MiB (`spec-unreadable`, read bounded and
+  non-blocking); an existing `<path>-origin.git` on the local substrate
+  (`path-not-empty`); and any git answer other than "not a git repository",
+  or `GIT_DIR`/`GIT_WORK_TREE` in the environment (`inside-work-tree`, fail
+  closed). A failed step's `detail` keeps every line of git's output, `repo` /
+  `remote` are reported as soon as `gh repo create` succeeds, the register
+  commit is made as the bot identity even when `GIT_AUTHOR_*` is set, a
+  leading `~` in `<path>`/`--spec` means the home directory, and `--owner`
+  must be a GitHub owner name (no leading, trailing or doubled hyphen).
+- **Register-trusted intake: one `gh` login can run `verity init` and the
+  worker (stage 114, ADR-0038 D2/D3/D7, dev#304).** The scanner's P4 tier now
+  keeps a `verity:request` authored by the worker's own login when its number
+  is listed in the intake register `.verity/intake.json` **committed on the
+  default branch** (`origin/HEAD`, read with `git show`; a working-tree copy is
+  never trusted). Every other self-authored request is still dropped and still
+  reported; when an entry is accepted the stderr note reads `skipped N
+  self-authored request(s), accepted M engine-registered (see
+  docs/autonomy.md)`. A missing register is the empty set (a project without
+  one behaves exactly as before, no knob); an unreadable or schema-invalid one
+  trusts nothing and prints one warning. `origin/HEAD` must be a symbolic ref
+  into `refs/remotes/origin/` (what `git clone`, `git remote set-head` and
+  `verity init` write): one re-pointed at a local branch, or a non-symbolic
+  one, trusts nothing and prints one warning when a register is at stake, so
+  an unpushed local commit can never pose as the default branch. The local
+  substrate is unchanged.
+  New `verity/bin/lib/intake.cjs` holds the reader and the schema-1
+  validator (also used by `verity init`).
+- **`operator snapshot` shows pending intake.** `queue.requests_pending` /
+  `queue.requests_parked` (OPEN `verity:request` items, split on
+  `verity:needs-human`; `null` offline) on both substrates, and when no stage
+  has a next action but a request is pending, `next` is the worker's own P4
+  step: `plan` on the lowest-numbered pending request. Additive only
+  (`schema` stays `1`). `operator snapshot` without `--json` now prints a
+  short human render (`waiting to be planned (N request(s) pending)` in that
+  state); `--json` is unchanged and remains the contract.
+- **The plan role reads the named spec first.** `plan.md` step 2: when a
+  request names a spec file (the register's `spec`, the issue body or the
+  local record title), that file is the request text; it is read before
+  anything else and never pasted into the issue. Lands in the installed
+  Claude command and the Codex skill.
+- **Spec-soundness gate: an unbuildable spec parks as needs-human with the
+  gaps named (stage 115, ADR-0038 D4, dev#304).** Before decomposing a request
+  `verity init` filed, the plan role judges the spec on six points (goal,
+  users, core flows, data kept, constraints, what "done" looks like) and, when
+  it is not buildable, writes no stage file and ends with
+  `{"verity":1,"outcome":"gated","gate":"spec-unsound","reason":"<one gap per line>"}`.
+  The worker parks the request `verity:needs-human` (never
+  `verity:awaiting-approval`: approving would re-run the same plan on the same
+  spec), keeps `verity:request`, counts no strike (the park breaks the
+  no-progress streak), and posts one gate comment: the gate and run id, a
+  `## Spec gaps` list (each gap redacted), and "amend `docs/spec.md`, then
+  `verity operator act clear-needs-human <n>` — the next tick re-plans". On the
+  local substrate the park is the record label (its commit subject ends
+  `(spec-unsound)`) and the gaps go to the run log. The run's usage rows carry
+  gate `spec-unsound`; the engine commits nothing for the parked plan. `operator
+  gates` lists the park per the operator-gate note of 2026-09-29 (`role:
+  "plan"`, no stage/PR/risk/evidence, `allowed_actions: ["clear-needs-human"]`,
+  `gaps[]` read from the worker's own gate comment; `[]` on local); snapshot
+  `requests_parked` counts it. Any other gated result, and a sound spec, take
+  exactly the path they took before. The agent-result wire is unchanged: the
+  worker re-reads the marker's gate from the run's transcript
+  (`agent-exec.readResultGate`). Plan step 3 in the installed Claude command
+  and Codex skill (later steps renumbered 4–9).
+
+### Changed
+
+- **`verity init`'s starter policy turns on the intent-artifact commit and the
+  work-item reconcile (stage 114 amendment item 0, contract operator-init v1
+  note 2026-09-29, dev#304).** `.verity/autonomy.yml` now carries
+  `agent.commit_intent_artifacts: true` and `agent.reconcile_work_items: true`
+  (were `false`): after the plan role returns, the engine commits and pushes
+  its stage files to `main` as `plan: intent artifacts — N file(s)` under the
+  `verity-worker` identity (ADR-0033) and files the `[stage N]` work items
+  (ADR-0026), so a project made by `verity init` no longer depends on a later
+  build sweeping the plan's files into its branch.
+
+### Merged commits (generated from Conventional Commits; `dev#NN` = dev-repo PR)
+
+#### Features
+- spec-soundness gate — plan parks an unsound init spec as needs-human with named gaps (dev#312)
+
+#### Chores
+- record PROM-0006 — finalize v1.7.0 released (prod tag v1.7.0)
+- record PROM-0006 — propose v1.7.0 (prod PR 9)
+
+#### Other
+- [stage 114] Register-trusted intake with one identity, pending-intake visibility, and the spec pointer the plan role reads (dev#310)
+- docs: init starter policy must enable intent-artifact commit + work-item reconcile — contract inv. 6 pinned, stage 114 item 0, ADR-0038 correction (dev#304, dev#306)
+- docs(contract): operator-init v1 — pin the refusal vocabulary landed by stage 113 (dev#308)
+- [stage 113] verity init: non-interactive project bootstrap behind contract operator-init v1 (both substrates, intake register, breaker open by default) (dev#308)
+- docs(plan): stages 113–115 — verity init, register-trusted intake, spec-soundness gate (dev#304, dev#305 dev#306 dev#307)
+- docs(adr): accept ADR-0038 — verity init behind operator-init v1, register-trusted intake (dev#304)
+- docs(architect): ADR-0038 + contract operator-init v1 — verity init, register-trusted intake, spec-soundness gate (dev#304)
+
 ## 1.7.0
 
 ### Added

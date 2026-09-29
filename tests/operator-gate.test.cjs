@@ -369,3 +369,211 @@ test('work: depends_on is present on EVERY item — [] for none, [3,4] parsed �
     'v1 work-item keys unchanged, depends_on appended',
   );
 });
+
+// ---------------------------------------------------------------------------
+// Stage 115 (ADR-0038 D4) — the spec-unsound gate on a request, exactly per the
+// operator-gate contract's 2026-09-29 additive note.
+// ---------------------------------------------------------------------------
+
+const specSoundness = require('../verity/bin/lib/spec-soundness.cjs');
+
+const FROZEN_GATE_KEYS = [
+  'schema',
+  'gate_id',
+  'work_item',
+  'pull_request',
+  'stage',
+  'role',
+  'gate',
+  'reason',
+  'risk',
+  'evidence',
+  'next_on_approve',
+  'allowed_actions',
+];
+
+// One stage gate (stage 1, awaiting-approval) + one spec-unsound request (#50),
+// one pending request (#51), one request parked for ANOTHER reason (#52).
+function specGateSnapshot() {
+  return {
+    online: true,
+    issues: [
+      { number: 101, title: '[stage 1] Core', state: 'OPEN', labels: ['verity:awaiting-approval'] },
+      {
+        number: 50,
+        title: 'Build the shop app',
+        state: 'OPEN',
+        labels: ['verity:request', 'verity:needs-human'],
+      },
+      { number: 51, title: 'Next thing', state: 'OPEN', labels: ['verity:request'] },
+      {
+        number: 52,
+        title: 'Other park',
+        state: 'OPEN',
+        labels: ['verity:request', 'verity:needs-human'],
+      },
+    ],
+    prs: [],
+    tags: [],
+  };
+}
+
+const bot = (body) => ({ body, user: { login: 'verity-bot' } });
+const GATE_GAPS = ['no users named', 'no data model for orders'];
+function specTrail(runId = 'run-9') {
+  return [
+    bot(`lock:${runId} expires:2026-09-29T01:00:00Z`),
+    bot(specSoundness.formatGateComment({ runId, number: 50, gaps: GATE_GAPS })),
+    bot(`🤖 **verity-worker** \`${runId}\` — ⏸️ gated\nroles: plan`),
+    bot(`unlock:${runId} outcome:gated`),
+  ];
+}
+
+function specGates(trails, extra = {}) {
+  const cwd = fixtureCwd([{ n: 1, title: 'Core' }]);
+  const reads = [];
+  const list = operator.gates(cwd, {
+    snapshot: specGateSnapshot(),
+    classify: () => null,
+    readComments: (n) => {
+      reads.push(n);
+      const t = trails[n];
+      if (t instanceof Error) {
+        throw t;
+      }
+      return t || [];
+    },
+    ...extra,
+  });
+  return { list, reads };
+}
+
+test('stage 115: operator gates renders a spec-unsound request per the contract note — every null, one action, gaps[] parsed', () => {
+  const { list, reads } = specGates({
+    50: specTrail(),
+    52: [bot('lock:run-3 expires:x'), bot('unlock:run-3 outcome:failed')],
+  });
+  assertEqual(JSON.stringify(reads), '[50,52]', 'one comment read per PARKED request only');
+  const g = list.find((x) => x.gate === 'spec-unsound');
+  assert(g, `the spec gate is listed: ${JSON.stringify(list)}`);
+  assertEqual(
+    list.filter((x) => x.gate === 'spec-unsound').length,
+    1,
+    '#52 (parked otherwise) is not this gate',
+  );
+  assertEqual(g.schema, 1, 'schema stays 1');
+  assertEqual(g.gate_id, 'gate-50-plan', 'gate id');
+  assertEqual(
+    JSON.stringify(g.work_item),
+    JSON.stringify({ type: 'issue', number: 50, title: 'Build the shop app' }),
+    'work_item',
+  );
+  assertEqual(g.pull_request, null, 'pull_request null');
+  assertEqual(g.stage, null, 'stage null');
+  assertEqual(g.role, 'plan', 'role plan');
+  assert(
+    g.reason.includes('spec-unsound') && g.reason.includes('clear-needs-human 50'),
+    `reason names the gate: ${g.reason}`,
+  );
+  assertEqual(g.risk, null, 'risk null');
+  assertEqual(
+    JSON.stringify(g.evidence),
+    JSON.stringify({
+      files_changed: null,
+      protected_paths: null,
+      changed_lines: null,
+      ci: null,
+      verified_cost_usd: null,
+      unknown_cost: null,
+    }),
+    'every evidence field null',
+  );
+  assertEqual(g.next_on_approve, null, 'approval does not apply');
+  assertEqual(JSON.stringify(g.allowed_actions), '["clear-needs-human"]', 'allowed_actions');
+  assertEqual(
+    JSON.stringify(g.gaps),
+    JSON.stringify(GATE_GAPS),
+    'gaps from ## Spec gaps, verbatim',
+  );
+
+  // The stage gate is unchanged, first, and carries no `gaps` key.
+  assertEqual(list[0].stage, 1, 'stage gates keep their place (first)');
+  assert(!('gaps' in list[0]), 'no gaps key on any other gate');
+
+  // requests_parked (stage 114) counts it — as it counts every parked request.
+  const snap = operator.snapshot(fixtureCwd([{ n: 1, title: 'Core' }]), {
+    snapshot: specGateSnapshot(),
+  });
+  assertEqual(snap.queue.requests_parked, 2, 'both parked requests counted');
+  assertEqual(snap.queue.requests_pending, 1, 'the pending one');
+});
+
+test('stage 115: frozen wire — the spec gate is the v1 key set in order plus the optional gaps', () => {
+  const { list } = specGates({ 50: specTrail() });
+  const g = list.find((x) => x.gate === 'spec-unsound');
+  assertEqual(
+    JSON.stringify(Object.keys(g)),
+    JSON.stringify([...FROZEN_GATE_KEYS, 'gaps']),
+    'v1 keys, gaps appended',
+  );
+  for (const other of list.filter((x) => x !== g)) {
+    assertEqual(
+      JSON.stringify(Object.keys(other)),
+      JSON.stringify(FROZEN_GATE_KEYS),
+      'other gates: v1 keys exactly',
+    );
+  }
+});
+
+test("stage 115: only the WORKER's gate comment counts — forged, superseded, unreadable, gapless, and local", () => {
+  // Forged: a human pastes the gate comment (no lock by that author).
+  const forged = specTrail();
+  forged[1] = { ...forged[1], user: { login: 'mallory' } };
+  assert(
+    !specGates({ 50: forged }).list.some((x) => x.gate === 'spec-unsound'),
+    'a forged comment is not the gate',
+  );
+  // Superseded: the worker's latest gate on the request is another gate.
+  const later = [
+    ...specTrail('run-9'),
+    bot('lock:run-10 expires:x'),
+    bot('⏸️ **verity-worker** `run-10` — paused at human gate `plan`\npending: x\napprove: y'),
+  ];
+  assert(
+    !specGates({ 50: later }).list.some((x) => x.gate === 'spec-unsound'),
+    'superseded by a later gate',
+  );
+  // Unreadable trail: nothing fabricated, no throw.
+  assert(
+    !specGates({ 50: new Error('HTTP 502') }).list.some((x) => x.gate === 'spec-unsound'),
+    'unreadable ⇒ not listed',
+  );
+  // A gate comment whose gap section cannot be read ⇒ gaps [].
+  const gapless = specTrail();
+  gapless[1] = bot(gapless[1].body.split('\n## Spec gaps')[0]);
+  const g = specGates({ 50: gapless }).list.find((x) => x.gate === 'spec-unsound');
+  assertEqual(JSON.stringify(g.gaps), '[]', 'unreadable section ⇒ []');
+  // Local: the park is the record's label-commit note; gaps [] (no comment surface).
+  const cwd = fixtureCwd([{ n: 1, title: 'Core' }]);
+  const notes = [];
+  const local = operator.gates(cwd, {
+    snapshot: specGateSnapshot(),
+    substrate: 'local',
+    classify: () => null,
+    readComments: () => {
+      throw new Error('no comment reads on local');
+    },
+    labelAddNote: (_cwd, n, label) => {
+      notes.push([n, label]);
+      return { ok: true, note: n === 50 ? 'spec-unsound' : null };
+    },
+  });
+  assertEqual(
+    JSON.stringify(notes),
+    '[[50,"verity:needs-human"],[52,"verity:needs-human"]]',
+    'one note read per parked request',
+  );
+  const lg = local.filter((x) => x.gate === 'spec-unsound');
+  assertEqual(lg.length, 1, 'only the noted park');
+  assertEqual(JSON.stringify(lg[0].gaps), '[]', 'gaps [] on local');
+});

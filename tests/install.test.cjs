@@ -249,3 +249,50 @@ test('dispatch --opencode routes to the OpenCode adapter', () => {
     process.env.PATH = savedPath;
   }
 });
+
+// Stage 114 (ADR-0038 D3): the plan role is told to read the named spec file
+// first — the sentence must survive the install transform on BOTH harnesses.
+const READ_SPEC_FIRST =
+  '**When the request names a spec file, read THAT file first — it is the request text.**';
+
+test('stage 114: the read-the-spec-first instruction lands in the installed Claude command and the Codex skill', () => {
+  const claude = sandbox('spec-claude');
+  install.installClaude({ target: claude.target, home: claude.home });
+  const cmd = fs.readFileSync(path.join(claude.target, 'commands', 'verity', 'plan.md'), 'utf8');
+  assert(cmd.includes(READ_SPEC_FIRST), 'Claude plan command carries the instruction');
+  assert(cmd.includes('.verity/intake.json'), 'Claude plan command names the register pointer');
+
+  const codex = sandbox('spec-codex');
+  install.installCodex({ target: codex.target, home: codex.home });
+  const skill = fs.readFileSync(
+    path.join(codex.target, 'skills', 'verity-plan', 'SKILL.md'),
+    'utf8',
+  );
+  assert(skill.includes(READ_SPEC_FIRST), 'Codex plan skill carries the instruction');
+  assert(skill.includes('never paste it back into the issue'), 'Codex skill: no paste-back');
+});
+
+// Stage 115 (ADR-0038 D4): the spec-soundness step and its marker line survive
+// the install transform on BOTH harnesses.
+const SOUNDNESS_STEP = '**Spec soundness (init-registered requests)**';
+const SOUNDNESS_MARKER =
+  '`{"verity":1,"outcome":"gated","gate":"spec-unsound","reason":"<one gap per line>"}`';
+
+test('stage 115: the spec-soundness step and the spec-unsound marker land in the installed Claude command and the Codex skill', () => {
+  const claude = sandbox('sound-claude');
+  install.installClaude({ target: claude.target, home: claude.home });
+  const cmd = fs.readFileSync(path.join(claude.target, 'commands', 'verity', 'plan.md'), 'utf8');
+  assert(cmd.includes(SOUNDNESS_STEP), 'Claude plan command carries the step');
+  assert(cmd.includes(SOUNDNESS_MARKER), 'Claude plan command carries the marker line');
+  assert(cmd.includes('**Never guess:**'), 'Claude: the never-guess rule');
+
+  const codex = sandbox('sound-codex');
+  install.installCodex({ target: codex.target, home: codex.home });
+  const skill = fs.readFileSync(
+    path.join(codex.target, 'skills', 'verity-plan', 'SKILL.md'),
+    'utf8',
+  );
+  assert(skill.includes(SOUNDNESS_STEP), 'Codex plan skill carries the step');
+  assert(skill.includes(SOUNDNESS_MARKER), 'Codex plan skill carries the marker line');
+  assert(skill.includes('**Never guess:**'), 'Codex: the never-guess rule');
+});

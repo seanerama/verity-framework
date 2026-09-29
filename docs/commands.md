@@ -318,6 +318,94 @@ each role on completion point you at what can run next. `/verity:deploy-setup` (
 `/verity:autonomy-setup` (how the worker runs) are one-time (or when-things-change)
 setup helpers, run independently of any single project's lifecycle.
 
+## Project bootstrap: verity init
+
+`verity init` creates a Verity project from a spec file with no vision or
+architect chat session, ready for the autonomy worker to plan (ADR-0038,
+contract [`operator-init`](../contracts/operator-init.md) v1). It is the engine
+verb behind a console "New project" flow; it runs no role, spends no model
+tokens and never starts the worker.
+
+```bash
+verity init <path> --spec <file> --name <name> --owner <owner>
+            [--slug <slug>] [--substrate github|local] [--private|--public]
+            [--start] [--gate <name>=<command>]… [--json]
+```
+
+- `<path>` is a local directory that is missing or empty, and not inside an
+  existing git work tree. `--spec` is a local, non-empty regular file of at
+  most 1 MiB with no secret in it. A leading `~` in either means your home
+  directory.
+- `--name`, `<path>`, `--gate` and the spec's title line must be single-line
+  printable text (no control characters, no U+2028/U+2029): they reach the
+  scaffolded files, commit messages and the intake title.
+- `--slug` defaults to the slug of `--name`, checked exactly as
+  `verity identity lock` checks it. `--owner` is the GitHub owner.
+- `--substrate` defaults to `github`. On GitHub the repository is **private**
+  unless `--public` is given.
+- `--gate <name>=<command>` (repeatable, argv order kept) writes
+  `.verity/gates.json`. Without it no gate file is written and the `gates` step
+  reports `skipped`: the walking-skeleton stage defines the gates with the stack
+  (a default gate list would be a fabricated green).
+- `--json` prints exactly one compact JSON object (the contract's wire). Exit
+  `0` ok, `2` refused, `1` failed.
+
+**Steps, in fixed order.** Only the steps that ran are listed; the first
+`ok:false` ends the list and names the failure, and every field the run did not
+establish is `null`.
+
+| step | effect |
+| --- | --- |
+| `preflight` | reads only; refuses with zero effects |
+| `identity` | lock the identity in `<path>` |
+| `scaffold` | the governance and hygiene-CI files; the description is the spec's first heading (or first line) |
+| `spec` | copy the spec verbatim to `docs/spec.md` |
+| `gates` | `.verity/gates.json` from `--gate`, else skipped |
+| `policy` | the starter `.verity/autonomy.yml`: `mode: supervised`, `review.trust: 0`, the chosen substrate, `unknown_cost_behavior: allow_with_token_limit`, and `agent.commit_intent_artifacts: true` / `agent.reconcile_work_items: true` (the engine commits and pushes the plan role's stage files and files their `[stage N]` work items — ADR-0033, ADR-0026) |
+| `git` | `git init -b main`, add, initial commit |
+| `remote` | github: `gh repo create <owner>/<slug> --source=. --push` plus the explicit `origin/HEAD`; local: a bare sibling `<path>-origin.git` |
+| `labels` | github: the Verity label set; local: skipped (records carry labels) |
+| `intake` | the `verity:request` intake (an issue on github, a work-item record on local) that points at `docs/spec.md`; the spec is not pasted |
+| `register` | `.verity/intake.json`, committed and pushed to `main` before the verb reports `ok` |
+
+**Refusals** (exit `2`; nothing on disk, in git or on GitHub). The `reason`
+reads `preflight: <token> — <why>`; the token is one of:
+
+| token | refused when |
+| --- | --- |
+| `invalid-path` | no `<path>`, more than one, a URL, a control character in it, or it exists and is not a directory |
+| `unknown-flag` | any flag not listed above (there is no `--force`) |
+| `identity-exists` | `<path>/.verity/identity.json` exists |
+| `path-not-empty` | `<path>` is not empty, or (local substrate) `<path>-origin.git` already exists in any form |
+| `inside-work-tree` | `<path>` is inside a git work tree or a git/bare repository, git cannot prove it is outside one (for example "dubious ownership"), or `GIT_DIR`/`GIT_WORK_TREE` is set |
+| `spec-unreadable` | `--spec` is missing, unreadable, empty, not a regular file (FIFO, device, directory, also through a symlink), over 1 MiB, carries a credential-shaped string (the production secret-scan shapes — `ghp_`, `github_pat_`, `sk-ant-`, `sk-proj-`, Slack, Google, AWS key ids, private-key blocks; ordinary prose about tokens or authorization is fine; the `detail` names the line numbers, never the text), or its title line has a control character |
+| `invalid-name` | `--name` is empty, has a control character or U+2028/U+2029, or carries a credential-shaped string (it is committed and pushed) |
+| `invalid-slug` | the slug fails `verity identity lock`'s check |
+| `invalid-owner` | `--owner` is not a GitHub owner name (letters, digits, single interior hyphens, at most 39) |
+| `invalid-substrate` | `--substrate` is not `github` or `local` |
+| `visibility-conflict` | `--private` with `--public` |
+| `invalid-gate` | a `--gate` is not `<name>=<command>`, has a control character, or carries a credential-shaped string (`gates.json` is pushed — reference the credential through an environment variable) |
+| `git-identity` | no git `user.name`/`user.email` for the initial commit |
+| `gh-auth` | on github, `gh auth status` fails |
+
+Re-running on the same path is refused, so `init` never overwrites a project.
+A failed step's `detail` keeps every line of the git or `gh` output, collapsed
+to one redacted line.
+
+**The breaker is open.** The intake carries `verity:circuit-open` unless you
+pass `--start`, so the worker halts on every tick until you close it:
+`verity operator act circuit close <n>` (`<n>` is `intake.number`). `gh repo
+create` and `gh issue create` are never re-sent after an ambiguous failure
+(a timeout, a reset, a 5xx); `init` reads back instead and marks a confirmed
+write `confirmed_by: "repo-view"` / `"issue-list"`.
+
+The worker can run under the same `gh` login that ran `init`: the request
+`init` filed is listed in the committed register, which makes it the one
+self-authored request the scanner accepts ([Self-authored requests are
+skipped](autonomy.md#self-authored-requests-are-skipped-single-account-setups)).
+`verity operator snapshot` shows it as `queue.requests_pending` with a `plan`
+next action until it is planned.
+
 ## CLI verbs
 
 The deterministic `verity` CLI underneath the roles, one line per verb in
@@ -358,6 +446,7 @@ flags and detail where a fuller section exists. Every verb takes `--raw`
 - `verity benchmark` — `provision` / `run` the opt-in benchmark harness; inert without an enabled `benchmark.json`.
 - `verity gates` — `run` the committed `.verity/gates.json` gates against the branch head, judged by exit code only. See [Local substrate gates](autonomy.md#local-substrate-gates-veritygatesjson).
 - `verity gate-runners` — `list` / `show` / `path` / `ensure` / `edit` the global `~/.verity/gate-runners.md` catalog of remote gate hosts. See [Local substrate & gate runners](../README.md#local-substrate--gate-runners-new-in-130).
+- `verity init` — create a project from a spec file with no chat session: identity, scaffold, spec, starter policy, git, remote, labels and a `verity:request` intake with the breaker open (`--start` leaves it closed); `--json` is the one-object wire, exit `0` / `2` refused / `1` failed. See [Project bootstrap](#project-bootstrap-verity-init).
 
 ## See also
 

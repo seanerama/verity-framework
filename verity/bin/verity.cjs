@@ -37,6 +37,7 @@ const operator = require('./lib/operator.cjs');
 const benchmark = require('./lib/benchmark.cjs');
 const gates = require('./lib/gates.cjs');
 const gateRunners = require('./lib/gate-runners.cjs');
+const init = require('./lib/init.cjs');
 
 function parseArgs(argv) {
   const positional = [];
@@ -251,6 +252,16 @@ const COMMANDS = {
   'gate-runners'(rest, flags) {
     return gateRunners.dispatch(rest, flags);
   },
+  // Project bootstrap (stage 113, ADR-0038, contracts/operator-init.md v1):
+  // `init <path> --spec <file> --name <n> --owner <o> …` creates a Verity
+  // project non-interactively in the contract's fixed step order. It takes the
+  // RAW argv (a repeatable --gate, boolean --start/--private/--public) and
+  // never throws — refused/failed are results (exit 2 / 1, set in main()).
+  // Net-new verb (not the `scaffold init` sub-verb, which is unchanged);
+  // removing this line removes it entirely.
+  init(rest, flags, argv) {
+    return init.dispatch(rest, flags, argv);
+  },
 };
 
 function main() {
@@ -277,7 +288,7 @@ function main() {
   }
 
   try {
-    const result = handler(positional.slice(1), flags);
+    const result = handler(positional.slice(1), flags, process.argv.slice(2));
     if (noun === 'next') {
       // SKETCH §3.1 contract: with --json, stdout is exactly ONE compact JSON
       // object and nothing else (pipe-safe — `verity next --json | jq ...`).
@@ -331,14 +342,31 @@ function main() {
       // (snapshot/work/gates/runs/run) carry no exit semantics. Stage 50: the
       // `act` write verb returns a result carrying a top-level `ok` — a failed
       // act MUST exit non-zero (fail-closed), an ok act exits 0.
+      const verb = positional[1] || 'snapshot';
       if (flags.json) {
         process.stdout.write(`${JSON.stringify(result)}\n`);
+      } else if (verb === 'snapshot' && !flags.raw) {
+        // Stage 114: `operator snapshot` without --json prints a short human
+        // render of the SAME projection (not contractual; --json is the wire).
+        process.stdout.write(operator.renderSnapshot(result));
       } else {
         emit(result, flags);
       }
       if (result && typeof result.ok === 'boolean') {
         process.exitCode = result.ok ? 0 : 1;
       }
+      return;
+    }
+    if (noun === 'init') {
+      // operator-init v1: --json = exactly one compact object on stdout; the
+      // human render is a short summary of the same result. Exit 0 ok /
+      // 2 refused / 1 failed.
+      if (flags.json) {
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+      } else {
+        process.stdout.write(init.render(result));
+      }
+      process.exitCode = init.exitCodeFor(result);
       return;
     }
     if (noun === 'gates') {

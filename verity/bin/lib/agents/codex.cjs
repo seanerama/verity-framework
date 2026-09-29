@@ -39,6 +39,7 @@ const {
   OUTCOMES,
   RESULT_CONTRACT,
   applyRoleArgs,
+  carriedGate,
   extractMarker,
   isPlainObject,
   validateRoleOutcome,
@@ -870,6 +871,8 @@ function fromStructured(structured) {
     outcome,
     artifacts: structured.artifacts.length > 0 ? { paths: structured.artifacts } : {},
     error: outcome === 'failed' ? structured.reason : null,
+    // Stage 115: only a worker-mapped gate (spec-unsound) adds keys here.
+    ...carriedGate(outcome, structured.gate, structured.reason),
   };
 }
 
@@ -883,6 +886,7 @@ function fromMarker(marker) {
           ? marker.reason
           : 'role reported failure'
         : null,
+    ...carriedGate(marker.outcome, marker.gate, marker.reason),
   };
 }
 

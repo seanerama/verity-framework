@@ -314,3 +314,165 @@ test('P5: pr target uses pr view for the label fetch', () => {
     true,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Stage 114 (ADR-0038 D2): P4 register trust. A self-authored request is kept
+// iff its number is in the intake register COMMITTED on the default branch
+// (origin/HEAD) of opts.cwd. Real git fixture; gh stays the injected stub.
+// ---------------------------------------------------------------------------
+
+const fs114 = require('node:fs');
+const os114 = require('node:os');
+const path114 = require('node:path');
+const { execFileSync: exec114 } = require('node:child_process');
+
+// A repo with origin/HEAD → main; `committed` is the register main carries
+// (object or raw text; undefined = none).
+function registerRepo(committed) {
+  const dir = fs114.mkdtempSync(path114.join(os114.tmpdir(), 'verity-scanner-intake-'));
+  const git = (...args) =>
+    exec114(
+      'git',
+      [
+        '-C',
+        dir,
+        '-c',
+        'user.name=Scanner Test',
+        '-c',
+        'user.email=scanner@verity.invalid',
+        '-c',
+        'commit.gpgsign=false',
+        ...args,
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+  git('init', '-q', '-b', 'main');
+  fs114.writeFileSync(path114.join(dir, 'README.md'), '# x\n');
+  if (committed !== undefined) {
+    writeRegisterFile(dir, committed);
+  }
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+  return dir;
+}
+
+function writeRegisterFile(dir, doc) {
+  fs114.mkdirSync(path114.join(dir, '.verity'), { recursive: true });
+  fs114.writeFileSync(
+    path114.join(dir, '.verity', 'intake.json'),
+    typeof doc === 'string' ? doc : JSON.stringify(doc),
+  );
+}
+
+const reg = (...numbers) => ({
+  schema: 1,
+  requests: numbers.map((number) => ({
+    number,
+    kind: 'issue',
+    spec: 'docs/spec.md',
+    spec_commit: 'abc1234',
+    filed_by: 'verity init',
+    engine: '1.8.0',
+    filed_at: '2026-09-29T18:00:00Z',
+  })),
+});
+const botReq = (number, createdAt) => issue(number, createdAt, { author: { login: 'verity-bot' } });
+
+function scanRegister(cwd, requests) {
+  const warns = [];
+  const { result } = scanWith(
+    { 'issue verity:request': requests },
+    { cwd, botLogin: 'verity-bot', warn: (m) => warns.push(m) },
+  );
+  return { result, warns };
+}
+
+test('stage 114: a bot-authored request whose number the committed register lists is SELECTED', () => {
+  const cwd = registerRepo(reg(1));
+  const { result, warns } = scanRegister(cwd, [botReq(1, '2026-06-01T00:00:00Z')]);
+  assertEqual(result?.tier, 'P4', 'P4 selection');
+  assertEqual(result.number, 1, 'the registered request');
+  assertEqual(warns.length, 1, 'one note');
+  assertEqual(
+    warns[0],
+    'skipped 0 self-authored request(s), accepted 1 engine-registered (see docs/autonomy.md)',
+  );
+});
+
+test('stage 114: a bot-authored request NOT in the register is still dropped, with the stage-28 note', () => {
+  const cwd = registerRepo(reg(1));
+  const { result, warns } = scanRegister(cwd, [botReq(2, '2026-06-01T00:00:00Z')]);
+  assertEqual(result, null, 'dropped → idle');
+  assertEqual(warns.length, 1);
+  assertEqual(
+    warns[0],
+    'skipped 1 self-authored request(s) (no self-feeding; see docs/autonomy.md)',
+    'byte-identical stage-28 note when nothing was accepted',
+  );
+});
+
+test('stage 114: registered and unregistered together ⇒ the note carries BOTH counts; FIFO among the kept', () => {
+  const cwd = registerRepo(reg(3));
+  const { result, warns } = scanRegister(cwd, [
+    botReq(2, '2026-06-01T00:00:00Z'), // unregistered, older
+    botReq(3, '2026-06-02T00:00:00Z'), // registered
+    issue(4, '2026-06-03T00:00:00Z', { author: { login: 'human' } }),
+  ]);
+  assertEqual(result.number, 3, 'oldest KEPT item (the unregistered #2 is gone)');
+  assertEqual(
+    warns[0],
+    'skipped 1 self-authored request(s), accepted 1 engine-registered (see docs/autonomy.md)',
+  );
+});
+
+test('stage 114: a malformed committed register trusts nothing — dropped, plus one warning', () => {
+  const cwd = registerRepo('{"schema":1,"requests":[{"number":1}]}');
+  const { result, warns } = scanRegister(cwd, [botReq(1, '2026-06-01T00:00:00Z')]);
+  assertEqual(result, null, 'fail closed');
+  assertEqual(warns.length, 2, 'the register warning, then the skip note');
+  assert(
+    /intake register \.verity\/intake\.json .*no engine-registered request is trusted/.test(
+      warns[0],
+    ),
+    warns[0],
+  );
+  assert(warns[1].startsWith('skipped 1 self-authored request(s) (no self-feeding'), warns[1]);
+});
+
+test('stage 114: a human-authored request is unaffected by the register (and no register read happens)', () => {
+  const cwd = registerRepo('not json at all'); // would warn if it were read
+  const { result, warns } = scanRegister(cwd, [
+    issue(9, '2026-06-01T00:00:00Z', { author: { login: 'human' } }),
+  ]);
+  assertEqual(result.number, 9, 'selected exactly as before');
+  assertEqual(warns.length, 0, 'the register is only read when a self-authored request exists');
+});
+
+test('stage 114 SECURITY: an UNCOMMITTED working-tree register entry does not make a bot request eligible', () => {
+  const cwd = registerRepo(reg(1));
+  writeRegisterFile(cwd, reg(1, 5)); // a role's file write, never committed
+  const { result, warns } = scanRegister(cwd, [botReq(5, '2026-06-01T00:00:00Z')]);
+  assertEqual(result, null, '#5 is listed only in the working tree — not trusted');
+  assert(warns[0].startsWith('skipped 1 self-authored request(s) (no self-feeding'), warns[0]);
+});
+
+test('stage 114: a record-kind register entry never trusts a GitHub issue of the same number', () => {
+  const doc = reg(1);
+  doc.requests[0].kind = 'record';
+  const cwd = registerRepo(doc);
+  const { result } = scanRegister(cwd, [botReq(1, '2026-06-01T00:00:00Z')]);
+  assertEqual(result, null, 'local record #1 and GitHub issue #1 share no namespace');
+});
+
+test('stage 114: a needs-human registered request stays dropped; a locked one is skipped', () => {
+  const cwd = registerRepo(reg(1, 2));
+  const nh = botReq(1, '2026-06-01T00:00:00Z');
+  nh.labels = [{ name: 'verity:needs-human' }];
+  const { result } = scanWith(
+    { 'issue verity:request': [nh, botReq(2, '2026-06-02T00:00:00Z')] },
+    { cwd, botLogin: 'verity-bot', isLocked: (it) => it.number === 2 },
+  );
+  assertEqual(result, null, 'needs-human and lock filters still apply to register-kept items');
+});

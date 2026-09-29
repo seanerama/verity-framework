@@ -107,6 +107,25 @@ function extractMarker(text) {
   return null;
 }
 
+// Stage 115 (ADR-0038 D4): the marker gates the WORKER maps to a behaviour of
+// their own (today only the plan role's `spec-unsound` — a needs-human park
+// with the named gaps, never an approval pause). Only a gated marker naming one
+// of these keeps its `gate` + `reason` on the DRIVER's normalized object
+// (driver → agent-exec, internal). They never reach the agent-result wire —
+// frozen v1 has no `gate` field; agent-exec destructures outcome/artifacts/
+// error only — the worker re-reads them via agent-exec.readResultGate. Every
+// other normalization (every other gated marker included) is byte-identical.
+// `reason` is the role's own text (the gap list); the worker redacts it
+// before it lands on GitHub.
+const CARRIED_GATES = ['spec-unsound'];
+
+function carriedGate(outcome, gate, reason) {
+  if (outcome !== 'gated' || typeof gate !== 'string' || !CARRIED_GATES.includes(gate)) {
+    return {};
+  }
+  return { gate, reason: typeof reason === 'string' ? reason : null };
+}
+
 function exitCodeFor(result) {
   const map = { success: 0, gated: 10, failed: 20, infra_error: 30 };
   const code = map[result?.outcome];
@@ -189,12 +208,14 @@ function validateRoleOutcome(obj) {
 
 module.exports = {
   AgentExecError,
+  CARRIED_GATES,
   OUTCOMES,
   RESULT_CONTRACT,
   ROLE_OUTCOMES,
   SCHEMA,
   applyRoleArgs,
   buildResult,
+  carriedGate,
   exitCodeFor,
   extractMarker,
   isPlainObject,

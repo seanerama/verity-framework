@@ -45,7 +45,7 @@
 // Node built-ins only (zero-dependency repo).
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const autonomy = require('./autonomy.cjs');
 const ledger = require('./ledger.cjs');
 
@@ -527,7 +527,21 @@ function createWorkItem(cwd, { title, labels = [], assignees = [] } = {}, opts =
 
 // Label ADD — the local `gh api POST .../labels`. Idempotent like GitHub's
 // POST (already-present ⇒ no-op, no commit). Missing/corrupt record throws.
+// Stage 115: `opts.note` (optional, a plain slug) is appended to the commit
+// subject — `… +verity:needs-human (spec-unsound)` — the local substrate's
+// record of WHY a label was applied (it has no comment surface, contract v1).
+// Absent ⇒ the subject is byte-identical.
+const LABEL_NOTE_RE = /^[a-z0-9][a-z0-9:-]*$/;
+
+function labelSubject(number, sign, label, note) {
+  const base = `verity: label work-item #${number} ${sign}${label}`;
+  return note === undefined ? base : `${base} (${note})`;
+}
+
 function addLabel(cwd, number, label, opts = {}) {
+  if (opts.note !== undefined && !LABEL_NOTE_RE.test(String(opts.note))) {
+    throw new Error(`invalid label note ${JSON.stringify(opts.note)}`);
+  }
   const rec = readWorkItem(cwd, number);
   if (rec.labels.includes(label)) {
     return { changed: false, record: rec };
@@ -535,8 +549,42 @@ function addLabel(cwd, number, label, opts = {}) {
   rec.labels.push(label);
   rec.updated_at = isoNow(opts);
   const rel = writeRecord(cwd, rec);
-  commitRecord(cwd, rel, `verity: label work-item #${number} +${label}`);
+  commitRecord(cwd, rel, labelSubject(number, '+', label, opts.note));
   return { changed: true, record: rec };
+}
+
+// Stage 115: the note recorded on the NEWEST `+<label>` commit of one record
+// (see addLabel) — how `operator gates` reads a local spec-unsound park.
+// A bounded, prompt-free READ of the record's own history (at most the newest
+// LABEL_NOTE_SCAN commits): { ok:true, note } — `note` null when the newest
+// `+<label>` commit carries none, or none is found — or { ok:false } when git
+// cannot answer. Never throws.
+const LABEL_NOTE_SCAN = 200;
+
+function labelAddNote(cwd, number, label) {
+  // Lazy: only this reader needs git-lifecycle's deadline helper.
+  const gitLifecycle = require('./agents/git-lifecycle.cjs');
+  const args = ['log', '-n', String(LABEL_NOTE_SCAN), '--format=%s', '--', recordRel(number)];
+  const res = spawnSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: gitLifecycle.gitTimeoutMs(args),
+    killSignal: 'SIGTERM',
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+  });
+  if (res.error || res.status !== 0) {
+    return { ok: false, note: null };
+  }
+  const base = labelSubject(number, '+', label);
+  for (const line of res.stdout.split('\n')) {
+    if (line === base) {
+      return { ok: true, note: null };
+    }
+    if (line.startsWith(`${base} (`) && line.endsWith(')')) {
+      return { ok: true, note: line.slice(base.length + 2, -1) };
+    }
+  }
+  return { ok: true, note: null };
 }
 
 // Label REMOVE — the local `gh api DELETE .../labels/<label>`, with the same
@@ -666,7 +714,11 @@ function gitOrThrow(cwd, args, what) {
     const detail = String(res.error?.stderr || res.error?.message || res.error)
       .split('\n')
       .find((l) => l.trim() !== '');
-    throw new Error(`${what}: git ${args.join(' ')} failed: ${detail || 'unknown error'}`);
+    const e = new Error(`${what}: git ${args.join(' ')} failed: ${detail || 'unknown error'}`);
+    // The full output rides along (the message keeps its first line only) so a
+    // caller can surface a git rejection's reason and hints (stage 113).
+    e.stderr = String(res.error?.stderr ?? '');
+    throw e;
   }
   return res.stdout;
 }
@@ -948,6 +1000,7 @@ module.exports = {
   localPrHead,
   createWorkItem,
   addLabel,
+  labelAddNote,
   removeLabel,
   closeWorkItem,
   readWorkItem,

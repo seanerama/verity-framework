@@ -40,6 +40,9 @@ const trust = require('./trust.cjs');
 // The projections below stay substrate-blind: they consume the snapshot shape,
 // never the substrate.
 const substrateLocal = require('./substrate-local.cjs');
+// Stage 115 (ADR-0038 D4): the spec-soundness gate's one text shape — the
+// worker writes the gate comment with it, `gates` reads `gaps[]` back with it.
+const specSoundness = require('./spec-soundness.cjs');
 
 const SCHEMA = 1;
 
@@ -48,6 +51,7 @@ const AWAITING_APPROVAL_LABEL = 'verity:awaiting-approval';
 const APPROVED_LABEL = 'verity:approved';
 const IN_PROGRESS_LABEL = 'verity:in-progress';
 const CIRCUIT_OPEN_LABEL = 'verity:circuit-open';
+const REQUEST_LABEL = 'verity:request';
 
 // Repository resolution, mirroring ledger.resolveRepo (not exported): an
 // explicit --repo/--gh-repo wins, then the GH_REPO env var, then null (the
@@ -169,6 +173,55 @@ function computeQueue(proj, snapshot, online) {
     }
   }
   return q;
+}
+
+// Stage 114 (ADR-0038 D7; operator-snapshot additive note 2026-09-29): pending
+// intake. OPEN `verity:request` items, split on `verity:needs-human` —
+// GitHub-observed labels from the snapshot's OWN issue fetch (github) or the
+// record store the local snapshot already lists (local); no new read. They
+// count requests AS LABELLED: the scanner's P4 author/register filter is
+// deliberately not re-derived here (contract note). Honest-unknown: offline,
+// or an issue list the snapshot could not read (null), ⇒ both null. `oldest`
+// is the LOWEST pending number — the deterministic stand-in for the scanner's
+// createdAt FIFO, because the snapshot's issue fetch carries no createdAt (and
+// this projection adds no fetch to get one).
+function computeRequests(snapshot, online) {
+  if (!online || !Array.isArray(snapshot.issues)) {
+    return { pending: null, parked: null, oldest: null };
+  }
+  let pending = 0;
+  let parked = 0;
+  let oldest = null;
+  for (const issue of snapshot.issues) {
+    if (String(issue?.state || '').toUpperCase() !== 'OPEN') {
+      continue;
+    }
+    const labels = itemLabels(issue);
+    if (!labels.has(REQUEST_LABEL)) {
+      continue;
+    }
+    if (labels.has(NEEDS_HUMAN_LABEL)) {
+      parked += 1;
+    } else {
+      pending += 1;
+      if (Number.isInteger(issue.number) && (oldest === null || issue.number < oldest)) {
+        oldest = issue.number;
+      }
+    }
+  }
+  return { pending, parked, oldest };
+}
+
+// The worker's OWN P4 synthesis (worker/index.cjs, the `first && item.tier ===
+// 'P4'` branch): plan on the request issue. Mirrored, not re-derived — used
+// only when next.decide has no action and a request is pending.
+function requestNext(number) {
+  return {
+    role: 'plan',
+    target_type: 'issue',
+    target: number,
+    reason: `request #${number} needs planning`,
+  };
 }
 
 // kind (next.decide target) → contract target_type.
@@ -450,6 +503,11 @@ function snapshot(cwd, opts = {}) {
   const decision = next.dispatch([], nextFlags, { snapshot: snap, now, ciGraceMs: opts.ciGraceMs });
 
   const { runtime, doctorHealth } = computeRuntime(opts.flags, policy, local);
+  const requests = computeRequests(snap, online);
+  let nextAction = projectNext(decision);
+  if (nextAction === null && requests.oldest !== null) {
+    nextAction = requestNext(requests.oldest);
+  }
 
   const result = {
     schema: SCHEMA,
@@ -465,8 +523,14 @@ function snapshot(cwd, opts = {}) {
     autonomy: computeAutonomy(policy, snap, online),
     runtime,
     worker: computeWorker(cwd, local),
-    queue: computeQueue(proj, snap, online),
-    next: projectNext(decision),
+    // Stage 114: the two additive request counts ride at the END of `queue`
+    // (the six stage buckets keep their order and meaning).
+    queue: {
+      ...computeQueue(proj, snap, online),
+      requests_pending: requests.pending,
+      requests_parked: requests.parked,
+    },
+    next: nextAction,
     limits: computeLimits(cwd, policy),
     health: {
       doctor: doctorHealth,
@@ -484,6 +548,79 @@ function snapshot(cwd, opts = {}) {
   };
 
   return redactDeep(result);
+}
+
+// Is this snapshot's `next` the mirrored P4 synthesis (requestNext above)?
+function isRequestNext(snap) {
+  const n = snap?.next;
+  return (
+    n !== null &&
+    typeof n === 'object' &&
+    n.role === 'plan' &&
+    n.target_type === 'issue' &&
+    n.reason === `request #${n.target} needs planning` &&
+    typeof snap.queue?.requests_pending === 'number' &&
+    snap.queue.requests_pending > 0
+  );
+}
+
+// Human render of a snapshot (stage 114) — the non-`--json` default of
+// `verity operator snapshot`. NOT contractual (the contract's wire is the
+// `--json` object; this render MAY change). A pure function of the projection:
+// it adds no read and no inference. A null count prints `?` (unknown), never 0.
+function renderSnapshot(snap) {
+  const v = (x) => (x === null || x === undefined ? '?' : String(x));
+  const q = snap.queue || {};
+  const lines = [];
+  lines.push(
+    `verity operator snapshot — ${snap.repository || '(no GitHub repository)'} — ${
+      snap.online ? 'online' : 'OFFLINE (state unknown, not "nothing to do")'
+    }`,
+  );
+  const a = snap.autonomy || {};
+  lines.push(
+    `  autonomy: mode ${v(a.mode)}, trust ${v(a.trust)}, circuit ${
+      a.circuit_open === true ? 'OPEN' : a.circuit_open === false ? 'closed' : '?'
+    }`,
+  );
+  lines.push(
+    `  queue: ready ${v(q.ready)}, in progress ${v(q.in_progress)}, waiting for CI ${v(
+      q.waiting_for_ci,
+    )}, awaiting approval ${v(q.awaiting_approval)}, needs human ${v(q.needs_human)}, blocked ${v(
+      q.blocked,
+    )}`,
+  );
+  lines.push(`  requests: ${v(q.requests_pending)} pending, ${v(q.requests_parked)} parked`);
+  let status;
+  if (!snap.online) {
+    status = 'unknown — GitHub was not observed';
+  } else if (isRequestNext(snap)) {
+    status = `waiting to be planned (${q.requests_pending} request(s) pending)`;
+  } else if (snap.next === null || snap.next === undefined) {
+    status = 'idle';
+  } else {
+    const n = snap.next;
+    const where =
+      n.target === null || n.target === undefined
+        ? ''
+        : ` ${n.target_type === 'pull_request' ? 'PR' : n.target_type || ''} #${n.target}`;
+    status = `next ${v(n.role)}${where} — ${v(n.reason)}`;
+  }
+  lines.push(`  status: ${status}`);
+  const l = snap.limits || {};
+  const cost = l.verified_cost_usd === null ? 'unknown' : `$${l.verified_cost_usd}`;
+  lines.push(
+    `  limits: runs today ${v(l.runs_today)}/${v(l.max_runs)}, verified cost ${cost}/$${v(
+      l.max_cost_usd,
+    )}, unknown-cost runs ${v(l.unknown_cost_runs)}`,
+  );
+  const h = snap.health || {};
+  lines.push(
+    `  health: doctor ${v(h.doctor)}, github ${v(h.github)}, runtime ${v(h.runtime)}, policy ${v(
+      h.policy,
+    )}`,
+  );
+  return `${lines.join('\n')}\n`;
 }
 
 // checks_green (trust.classify) → contract `ci`. true → "green", false → "red",
@@ -651,6 +788,120 @@ function gateDescriptor(stage, labels, bucket, unverifiedCi, snap, now, ciGraceM
   return { role: d.role ?? statusRole, gate: d.gate ?? null, reason: d.reason ?? null };
 }
 
+// --- Stage 115 (ADR-0038 D4): the spec-soundness gate on a request ----------
+//
+// A request the plan role judged unbuildable is parked `verity:needs-human`
+// with `verity:request` kept. It surfaces here exactly per the operator-gate
+// contract's 2026-09-29 additive note — role plan, no stage, no PR, no risk,
+// every evidence field null, no approval (`next_on_approve: null`), the one
+// action `clear-needs-human`, and the OPTIONAL `gaps[]`. Membership is the
+// park the WORKER recorded, never the labels alone (a request can be parked
+// for other reasons — a no-progress strike, a human — and those are not this
+// gate):
+//   - github: the item's latest worker gate comment is a spec-unsound one. A
+//     gate comment counts as the worker's only when its author also wrote the
+//     `lock:<run-id>` comment of the run the gate comment names (the worker
+//     locks the request before it plans it) — text alone never qualifies.
+//     One bounded comment read per parked request, and only for those; an
+//     unreadable trail surfaces nothing for that request (it stays counted in
+//     snapshot.queue.requests_parked).
+//   - local: the record's newest `+verity:needs-human` label commit carries
+//     the spec-unsound note (contract local-work-item v1 has no comment
+//     surface); `gaps` is `[]` — the gaps are on the run log.
+const RUN_GATE_LINE_RE = /^⏸️ \*\*verity-worker\*\* `([A-Za-z0-9][A-Za-z0-9._-]*)` — /;
+const LOCK_LINE_RE = /^lock:(\S+)\s/;
+
+function commentLogin(c) {
+  const login = c !== null && typeof c === 'object' ? c.user?.login : null;
+  return typeof login === 'string' && login !== '' ? login.toLowerCase() : null;
+}
+
+// The latest worker gate comment on a request's trail (ascending), when it is
+// a spec-unsound one: { gaps } — else null.
+function latestSpecUnsound(trail) {
+  const list = Array.isArray(trail) ? trail : [];
+  const lockAuthors = new Map(); // run id → Set<login>
+  for (const c of list) {
+    const m = LOCK_LINE_RE.exec(typeof c?.body === 'string' ? c.body : '');
+    const login = commentLogin(c);
+    if (m !== null && login !== null) {
+      if (!lockAuthors.has(m[1])) {
+        lockAuthors.set(m[1], new Set());
+      }
+      lockAuthors.get(m[1]).add(login);
+    }
+  }
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const c = list[i];
+    const body = typeof c?.body === 'string' ? c.body : '';
+    const m = RUN_GATE_LINE_RE.exec(body.split('\n')[0]);
+    const login = commentLogin(c);
+    if (m === null || login === null || !lockAuthors.get(m[1])?.has(login)) {
+      continue; // not a gate comment, or not the worker's own
+    }
+    const parsed = specSoundness.parseGateComment(body);
+    return parsed === null ? null : { gaps: parsed.gaps };
+  }
+  return null;
+}
+
+function specUnsoundGate(issue, gaps) {
+  const n = issue.number;
+  return {
+    schema: SCHEMA,
+    gate_id: `gate-${n}-plan`,
+    work_item: { type: 'issue', number: n, title: issue.title ?? null },
+    pull_request: null,
+    stage: null,
+    role: 'plan',
+    gate: specSoundness.SPEC_UNSOUND_GATE,
+    reason: `request #${n} parked at the spec-soundness gate \`${specSoundness.SPEC_UNSOUND_GATE}\` (${NEEDS_HUMAN_LABEL}) — ${specSoundness.resumeHint(n)}`,
+    risk: null,
+    evidence: {
+      files_changed: null,
+      protected_paths: null,
+      changed_lines: null,
+      ci: null,
+      verified_cost_usd: null,
+      unknown_cost: null,
+    },
+    next_on_approve: null,
+    allowed_actions: ['clear-needs-human'],
+    gaps,
+  };
+}
+
+function specUnsoundGates(cwd, snap, { local, repo, readComments, labelAddNote }) {
+  const out = [];
+  for (const issue of Array.isArray(snap.issues) ? snap.issues : []) {
+    if (String(issue?.state || '').toUpperCase() !== 'OPEN' || !Number.isInteger(issue.number)) {
+      continue;
+    }
+    const labels = itemLabels(issue);
+    if (!labels.has(REQUEST_LABEL) || !labels.has(NEEDS_HUMAN_LABEL)) {
+      continue;
+    }
+    if (local) {
+      const r = labelAddNote(cwd, issue.number, NEEDS_HUMAN_LABEL);
+      if (r.ok && r.note === specSoundness.LOCAL_LABEL_NOTE) {
+        out.push(specUnsoundGate(issue, []));
+      }
+      continue;
+    }
+    let trail;
+    try {
+      trail = readComments(issue.number, { repo, cwd });
+    } catch {
+      continue; // unobservable: never a fabricated gate
+    }
+    const found = latestSpecUnsound(trail);
+    if (found !== null) {
+      out.push(specUnsoundGate(issue, found.gaps));
+    }
+  }
+  return out;
+}
+
 // `verity operator gates --json` — the work items paused at a human gate
 // (contracts/operator-gate.md), each enriched with the evidence to decide. One
 // object per gated item: a stage bucketed awaiting_approval / needs_human, OR a
@@ -748,6 +999,18 @@ function gates(cwd, opts = {}) {
       emitted.add(st.number);
     }
   }
+
+  // Stage 115: requests parked at the spec-soundness gate (after every stage
+  // gate, so the stage gates' order is unchanged). Injectable readers for the
+  // contract tests: opts.readComments (github), opts.labelAddNote (local).
+  out.push(
+    ...specUnsoundGates(cwd, snap, {
+      local,
+      repo: resolveRepo(repo) || undefined,
+      readComments: opts.readComments || ((n, o) => require('./locks.cjs').readComments(n, o)),
+      labelAddNote: opts.labelAddNote || substrateLocal.labelAddNote,
+    }),
+  );
 
   return redactDeep(out);
 }
@@ -1073,6 +1336,7 @@ function dispatch(args, flags = {}) {
 module.exports = {
   SCHEMA,
   snapshot,
+  renderSnapshot,
   work,
   gates,
   runs,
