@@ -3476,3 +3476,183 @@ test('stage 108: a worker run on a scaffolded repo (ledger ignored at birth) mak
   assert(!fs.existsSync(path.join(fx.dir, '.verity', 'usage.csv')), 'nothing in the tree');
   assertEqual(fxGit(fx, ['status', '--porcelain']).trim(), '', 'the tree stays clean');
 });
+
+// ---------------------------------------------------------------------------
+// Stage 115 (ADR-0038 D4, #304) — the spec-soundness gate, end to end on the
+// github substrate (stateful gh stub, real drivers, real usage ledger).
+// ---------------------------------------------------------------------------
+
+const SPEC_GAPS = ['no users named', 'no data model for orders', 'success criterion missing'];
+const unsoundMarker = () => marker('gated', { gate: 'spec-unsound', reason: SPEC_GAPS.join('\n') });
+
+function clearNeedsHuman(fx, number) {
+  const s = ghState(fx);
+  const it = itemIn(s, number);
+  it.labels = (it.labels || []).filter(
+    (l) => (typeof l === 'string' ? l : l.name) !== 'verity:needs-human',
+  );
+  fs.writeFileSync(fx.stateFile, JSON.stringify(s));
+}
+
+function setQueue(fx, queue) {
+  fs.writeFileSync(fx.queueFile, JSON.stringify(queue));
+}
+
+test('stage 115 e2e: an unsound spec parks the request needs-human with the named gaps — request kept, no awaiting-approval, no strike, usage gate spec-unsound', () => {
+  const fx = fixture({ issues: [REQUEST_ISSUE], queue: [{ final: unsoundMarker() }] });
+  const { code, stderr } = runWorker(fx);
+  assertEqual(code, 0, `a gated run exits 0 (stderr: ${stderr})`);
+  const state = ghState(fx);
+  const ls = labels(state, 30);
+  assert(ls.includes('verity:needs-human'), `parked needs-human: ${ls}`);
+  assert(ls.includes('verity:request'), `verity:request retained: ${ls}`);
+  assert(!ls.includes('verity:awaiting-approval'), `never awaiting-approval: ${ls}`);
+  assert(!fs.existsSync(path.join(fx.dir, 'stage-instructions')), 'no stage file written');
+
+  const cs = comments(state, 30);
+  const gate = cs.filter((b) => b.startsWith('⏸️'));
+  assertEqual(gate.length, 1, `exactly one gate comment: ${JSON.stringify(cs)}`);
+  const lines = gate[0].split('\n');
+  assert(
+    /^⏸️ \*\*verity-worker\*\* `run-[^`]+` — paused at human gate `spec-unsound`$/.test(lines[0]),
+    `first line names the gate and the run id: ${lines[0]}`,
+  );
+  const at = lines.indexOf('## Spec gaps');
+  assert(at > 0, `the fixed heading: ${gate[0]}`);
+  assertEqual(
+    JSON.stringify(lines.slice(at + 1, at + 1 + SPEC_GAPS.length)),
+    JSON.stringify(SPEC_GAPS.map((g) => `- ${g}`)),
+    'the reason lines, verbatim',
+  );
+  assert(
+    gate[0].includes(
+      'amend `docs/spec.md`, then `verity operator act clear-needs-human 30` — the next tick re-plans',
+    ),
+    `the resume instruction: ${gate[0]}`,
+  );
+  assert(!/^parked: /m.test(gate[0]), 'no parked-result pointer (nothing to resume or merge)');
+  assert(!gate[0].includes('verity:approved'), 'no approval instruction');
+
+  const summary = cs.find((b) => b.startsWith('🤖'));
+  assert(summary.includes('⏸️ gated'), `summary outcome gated: ${summary}`);
+  assert(summary.includes('roles: plan'), 'the plan role ran');
+  assert(/^result: gated at spec-unsound — /m.test(summary), `gate named: ${summary}`);
+  assert(
+    summary.includes(
+      'approve: amend `docs/spec.md`, then `verity operator act clear-needs-human 30`',
+    ),
+    `the summary's action line is the true one: ${summary}`,
+  );
+  assert(
+    cs.some((b) => /^unlock:\S+ outcome:gated$/.test(b)),
+    'the unlock records outcome:gated',
+  );
+  assert(
+    !cs.some((b) => /^unlock:\S+ outcome:failed/.test(b)),
+    'no strike (no outcome:failed unlock)',
+  );
+
+  const rows = readUsageCsv(fx).slice(1);
+  assert(rows.length >= 1, 'usage rows written');
+  for (const row of rows) {
+    const cells = row.split(',');
+    assertEqual(cells[8], 'gated', `usage outcome gated: ${row}`);
+    assertEqual(cells[11], 'spec-unsound', `usage gate spec-unsound: ${row}`);
+  }
+});
+
+test('stage 115 e2e: clearing the park re-plans — repeated parks never strike — and a sound spec proceeds to Mode A and retires the request', () => {
+  const fx = fixture({ issues: [REQUEST_ISSUE], queue: [{ final: unsoundMarker() }] });
+  assertEqual(runWorker(fx).code, 0, 'tick 1 parks');
+  const planSummaries = () =>
+    comments(ghState(fx), 30).filter((b) => b.startsWith('🤖') && b.includes('roles: plan'));
+  assertEqual(planSummaries().length, 1, 'one plan run so far');
+
+  // Parked: the P4 tier does not re-select it (nothing dispatched — the agent
+  // queue is empty, so a dispatch would fail the run).
+  const idle = runWorker(fx);
+  assertEqual(idle.code, 0, `a parked request is not worked (stderr: ${idle.stderr})`);
+  assertEqual(planSummaries().length, 1, 'no re-plan while parked');
+
+  // Cleared (operator act clear-needs-human removes the label) — still unsound.
+  clearNeedsHuman(fx, 30);
+  setQueue(fx, [{ final: unsoundMarker() }]);
+  assertEqual(runWorker(fx).code, 0, 'tick 3 re-plans and parks again');
+  assertEqual(planSummaries().length, 2, 'the cleared request WAS re-planned');
+  assert(labels(ghState(fx), 30).includes('verity:needs-human'), 'parked again');
+
+  // Cleared again, spec amended: the plan is sound and writes the first slice.
+  // Two prior plan summaries would trip the no-progress breaker (MAX 2) if a
+  // spec-unsound park counted as a repeat — it must not.
+  clearNeedsHuman(fx, 30);
+  setQueue(fx, [
+    {
+      createStages: [{ title: 'Skeleton', number: 1 }],
+      final: marker('success', { artifacts: { issues: [32] } }),
+      addIssues: [
+        { number: 32, title: '[stage 1] Skeleton', state: 'OPEN', labels: [], assignees: [] },
+      ],
+    },
+    { final: marker('gated', { gate: 'build' }) }, // stop the chain cleanly
+  ]);
+  const sound = runWorker(fx);
+  assertEqual(sound.code, 0, `tick 4 exits 0 (stderr: ${sound.stderr})`);
+  const cs = comments(ghState(fx), 30);
+  const last = cs.filter((b) => b.startsWith('🤖')).pop();
+  assert(!last.includes('no progress'), `no no-progress refusal: ${last}`);
+  assert(last.startsWith('🤖') && /roles: plan/.test(last), `planned: ${last}`);
+  assert(
+    fs.existsSync(path.join(fx.dir, 'stage-instructions', 'stage-1-skeleton.md')),
+    'the sound plan wrote its stage',
+  );
+  const ls = labels(ghState(fx), 30);
+  assert(!ls.includes('verity:request'), `a sound plan retires verity:request: ${ls}`);
+  assert(!ls.includes('verity:needs-human'), 'not parked');
+});
+
+test('stage 115 regression: a P4 plan gated at ANY other gate keeps the approval pause, byte-for-byte', () => {
+  const fx = fixture({
+    issues: [REQUEST_ISSUE],
+    queue: [{ final: marker('gated', { gate: 'plan:confirm', reason: 'no users named' }) }],
+  });
+  assertEqual(runWorker(fx).code, 0);
+  const state = ghState(fx);
+  const ls = labels(state, 30);
+  assert(ls.includes('verity:awaiting-approval'), `today's pause: ${ls}`);
+  assert(!ls.includes('verity:needs-human'), `no needs-human park: ${ls}`);
+  const gate = comments(state, 30).find((b) => b.startsWith('⏸️'));
+  const runId = /`(run-[^`]+)`/.exec(gate)[1];
+  assertEqual(
+    gate,
+    worker.formatGateComment({
+      runId,
+      gate: 'plan',
+      pending: 'role plan stopped at a human gate — request #30 needs planning',
+      mentions: ['seanerama'],
+    }),
+    'the gatePause comment, exactly',
+  );
+  const summary = comments(state, 30).find((b) => b.startsWith('🤖'));
+  assert(/^result: gated at plan$/m.test(summary), `today's result line: ${summary}`);
+  assert(/^approve: apply label `verity:approved`$/m.test(summary), "today's approve line");
+});
+
+test('stage 115 e2e (codex): the marker gate is re-read from the codex transcript — the same park, no approval pause', () => {
+  const fx = fixture({
+    git: true,
+    issues: [REQUEST_ISSUE],
+    policy: `${POLICY_CODEX}notify:\n  mention: [seanerama]\n`,
+    queue: [{ final: unsoundMarker() }],
+  });
+  const { code, stderr } = runWorker(fx, { env: codexEnv(fx) });
+  assertEqual(code, 0, `gated codex run exits 0 (stderr: ${stderr})`);
+  const state = ghState(fx);
+  const ls = labels(state, 30);
+  assert(ls.includes('verity:needs-human') && ls.includes('verity:request'), `parked: ${ls}`);
+  assert(!ls.includes('verity:awaiting-approval'), `no approval pause: ${ls}`);
+  const gate = comments(state, 30).find((b) => b.startsWith('⏸️'));
+  assert(
+    gate.includes(`## Spec gaps\n${SPEC_GAPS.map((g) => `- ${g}`).join('\n')}\n`),
+    `gaps verbatim: ${gate}`,
+  );
+});

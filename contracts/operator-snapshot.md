@@ -111,3 +111,17 @@ contract, not an edit (framework-spec §4.3). Every consumer (the Console's
 Mission Control view first) depends on this shape. The sibling read contracts
 (`operator-gate`, `operator-run`) and the write surface (`verity operator act …`)
 are separate seams, planned as their own stages once this one is stable.
+
+Amended additively 2026-09-29 (ADR-0038, request #304): `queue` MAY carry
+`requests_pending: number | null` (OPEN `verity:request` items not labelled
+`verity:needs-human` — the intake the worker's P4 tier will plan next) and
+`requests_parked: number | null` (OPEN `verity:request` items labelled
+`verity:needs-human`, e.g. parked by the `spec-unsound` gate). Both follow
+invariant 4 (`null` when GitHub was not observed, never a zero-filled all-clear).
+They count labelled requests as observed; the P4 author filter is not re-derived
+here. When no stage decision exists and `requests_pending > 0`, `next` MAY be the
+worker's own P4 synthesis — `{ "role": "plan", "target_type": "issue", "target":
+<oldest pending request>, "reason": "request #n needs planning" }` — the same rule
+`verity/worker/index.cjs` applies on a P4 selection (invariant 2 holds: this is a
+projection of the worker's rule, not a new derivation). OPTIONAL: consumers
+tolerate absence (a pre-ADR-0038 engine omits the fields); `schema` stays `1`.

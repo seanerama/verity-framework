@@ -955,7 +955,10 @@ function runDispatch(args, flags, session) {
 // (never a guessed success); the caller's fallback owns what happens next.
 // run-id and role commonly arrive from a worker-authored GitHub comment, so
 // they are validated as path components here, at the boundary, not trusted.
-function readParkedResult(flags = {}) {
+// The persisted result of one run/role, normalized by its driver — or null
+// when nothing is persisted (or the provider persists nothing re-readable).
+// Shared by readParkedResult and readResultGate below.
+function readPersistedNormalized(flags) {
   const runId = flags['run-id'] ?? flags.runId;
   const role = flags.role;
   if (typeof runId !== 'string' || !SAFE_ID.test(runId)) {
@@ -982,8 +985,37 @@ function readParkedResult(flags = {}) {
   if (final === null) {
     return null; // neither the transcript nor the final-message file exists
   }
-  const normalized = provider.normalizeResult(final, { maxTurns: DEFAULT_MAX_TURNS });
+  return provider.normalizeResult(final, { maxTurns: DEFAULT_MAX_TURNS });
+}
+
+function readParkedResult(flags = {}) {
+  const normalized = readPersistedNormalized(flags);
+  if (normalized === null) {
+    return null;
+  }
   return { outcome: normalized.outcome, artifacts: normalized.artifacts, error: normalized.error };
+}
+
+// Stage 115 (ADR-0038 D4): the role's OWN marker gate for a completed gated
+// dispatch — { gate, reason } — re-read from the run's log directory with the
+// same driver parsing, or null when the marker named no worker-mapped gate
+// (result-contract.cjs CARRIED_GATES: `spec-unsound`) or nothing is persisted.
+// The frozen agent-result v1 wire carries no `gate` field (the marker's gate
+// is consumed, never emitted — contracts/agent-result.md §Consumes), so the
+// worker asks for it here instead of the wire growing a key: every dispatch
+// result stays byte-identical. Zero spawns; the caller calls it only for a
+// gated P4 plan. Throws AgentExecError on malformed persisted output, exactly
+// as readParkedResult does — the caller falls back to today's gate path.
+function readResultGate(flags = {}) {
+  const normalized = readPersistedNormalized(flags);
+  if (
+    normalized === null ||
+    normalized.outcome !== 'gated' ||
+    typeof normalized.gate !== 'string'
+  ) {
+    return null;
+  }
+  return { gate: normalized.gate, reason: normalized.reason ?? null };
 }
 
 // The public entry point: run the dispatch, then undo whatever it did to the
@@ -1029,6 +1061,7 @@ module.exports = {
   parseVersion,
   readAllowlist: claude.readAllowlist,
   readParkedResult,
+  readResultGate,
   renderPrompt: claude.renderPrompt,
   resolveRole,
 };

@@ -27,8 +27,14 @@ const { checkBinary } = require('../doctor.cjs');
 // carry the same preambles as installed files — one system, never two copies.
 const { renderRole } = require('../install.cjs');
 
-const { AgentExecError, RESULT_CONTRACT, applyRoleArgs, extractMarker, isPlainObject } =
-  require('./result-contract.cjs');
+const {
+  AgentExecError,
+  RESULT_CONTRACT,
+  applyRoleArgs,
+  carriedGate,
+  extractMarker,
+  isPlainObject,
+} = require('./result-contract.cjs');
 
 // Version floor from the IN-SUBTREE engine-meta.json (stage 35), not a top-level
 // `require('../../../../package.json')` above the engine root (which crashed a
@@ -372,6 +378,8 @@ function normalizeResult(final, { maxTurns }) {
             ? marker.reason
             : 'role reported failure'
           : null,
+      // Stage 115: only a worker-mapped gate (spec-unsound) adds keys here.
+      ...carriedGate(outcome, marker.gate, marker.reason),
     };
   }
   if (final.is_error === false && final.subtype === 'success') {

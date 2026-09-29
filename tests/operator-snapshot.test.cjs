@@ -274,3 +274,137 @@ test('a token-shaped string in an input reason never appears in the output', () 
   assert(!serialized.includes(token), 'no token shape survives anywhere in the output');
   assert(snap.next.reason.includes('[redacted]'), 'the reason carries the redacted marker');
 });
+
+// ---------------------------------------------------------------------------
+// Stage 114 (ADR-0038 D7; the 2026-09-29 additive note): pending intake.
+// queue.requests_pending / requests_parked (OPEN verity:request items split on
+// verity:needs-human; null offline) and the mirrored P4 `next` synthesis.
+// ---------------------------------------------------------------------------
+
+const { execFileSync: execFile114 } = require('node:child_process');
+
+const reqIssue = (number, labels = [], state = 'OPEN') => ({
+  number,
+  title: `[request] thing ${number}`,
+  state,
+  labels: ['verity:request', ...labels],
+  assignees: [],
+});
+
+function ghSnap(issues, prs = []) {
+  return { online: true, verified: true, issues, prs, tags: [], failures: [] };
+}
+
+test('frozen wire, additive (stage 114): queue carries requests_pending/requests_parked after the six buckets; schema stays 1', () => {
+  const cwd = fixtureCwd(populatedStages());
+  const snap = operator.snapshot(cwd, { snapshot: populatedSnapshot() });
+  assertEqual(snap.schema, 1, 'schema unchanged');
+  assertEqual(
+    Object.keys(snap.queue).join(','),
+    'ready,in_progress,waiting_for_ci,awaiting_approval,needs_human,blocked,requests_pending,requests_parked',
+    'queue keys: the six frozen buckets in order, then the two optional fields',
+  );
+  assertEqual(snap.queue.requests_pending, 0, 'no requests in the fixture ⇒ 0 (observed)');
+  assertEqual(snap.queue.requests_parked, 0);
+});
+
+test('stage 114 github: requests counted from the snapshot issue labels, split on needs-human; closed/unlabelled ignored', () => {
+  const cwd = fixtureCwd([]);
+  const snap = operator.snapshot(cwd, {
+    snapshot: ghSnap([
+      reqIssue(7),
+      reqIssue(3),
+      reqIssue(9, ['verity:needs-human']),
+      reqIssue(11, [], 'CLOSED'),
+      { number: 12, title: 'x', state: 'OPEN', labels: ['enhancement'], assignees: [] },
+      { ...reqIssue(13), labels: [{ name: 'Verity:Request' }] }, // gh object labels, any case
+    ]),
+  });
+  assertEqual(snap.queue.requests_pending, 3, 'pending: #3, #7, #13');
+  assertEqual(snap.queue.requests_parked, 1, 'parked: #9');
+});
+
+test('stage 114: no stage decision + a pending request ⇒ next is the worker P4 synthesis on the LOWEST pending number', () => {
+  const cwd = fixtureCwd([]);
+  const snap = operator.snapshot(cwd, {
+    snapshot: ghSnap([reqIssue(7), reqIssue(3), reqIssue(2, ['verity:needs-human'])]),
+  });
+  assertEqual(
+    JSON.stringify(snap.next),
+    JSON.stringify({
+      role: 'plan',
+      target_type: 'issue',
+      target: 3,
+      reason: 'request #3 needs planning',
+    }),
+    'plan on #3 (the parked #2 is not pending)',
+  );
+  assert(
+    operator.renderSnapshot(snap).includes('waiting to be planned (2 request(s) pending)'),
+    'the human render says waiting to be planned',
+  );
+});
+
+test('stage 114: a stage decision wins — the request does NOT replace next', () => {
+  const cwd = fixtureCwd(populatedStages());
+  const fixture = populatedSnapshot();
+  fixture.issues.push(reqIssue(50));
+  const snap = operator.snapshot(cwd, { snapshot: fixture });
+  assertEqual(snap.queue.requests_pending, 1, 'counted');
+  assertEqual(snap.next.role, 'review', 'next.decide still drives next');
+  assertEqual(snap.next.target, 201);
+  assert(!operator.renderSnapshot(snap).includes('waiting to be planned'), 'no waiting line');
+});
+
+test('stage 114: only a PARKED request ⇒ next stays null (nothing pending to plan)', () => {
+  const cwd = fixtureCwd([]);
+  const snap = operator.snapshot(cwd, { snapshot: ghSnap([reqIssue(4, ['verity:needs-human'])]) });
+  assertEqual(snap.queue.requests_pending, 0);
+  assertEqual(snap.queue.requests_parked, 1);
+  assertEqual(snap.next, null, 'idle');
+  assert(operator.renderSnapshot(snap).includes('status: idle'), 'render reads idle');
+});
+
+test('stage 114: offline ⇒ requests_pending/requests_parked null (never a zero all-clear), no synthesis', () => {
+  const cwd = fixtureCwd([]);
+  const snap = operator.snapshot(cwd, {
+    snapshot: { online: false, verified: false, issues: null, prs: null, tags: [], failures: [] },
+  });
+  assertEqual(snap.queue.requests_pending, null, 'pending null');
+  assertEqual(snap.queue.requests_parked, null, 'parked null');
+  assert(
+    snap.next === null || snap.next.role !== 'plan',
+    'no plan synthesized from unobserved state',
+  );
+  const text = operator.renderSnapshot(snap);
+  assert(text.includes('requests: ? pending, ? parked'), `unknown renders as ?: ${text}`);
+});
+
+test('stage 114 local: requests counted from the record store the local snapshot lists; next = plan', () => {
+  const cwd = fixtureCwd([]);
+  execFile114('git', ['-C', cwd, 'init', '-q', '-b', 'main'], { stdio: 'ignore' });
+  const dir = path.join(cwd, '.verity', 'work-items');
+  fs.mkdirSync(dir, { recursive: true });
+  const rec = (number, labels, state = 'OPEN') => ({
+    schema: 1,
+    number,
+    title: `[request] r${number} — spec: docs/spec.md`,
+    state,
+    labels,
+    assignees: [],
+    created_at: '2026-09-29T18:00:00Z',
+    updated_at: '2026-09-29T18:00:00Z',
+  });
+  const put = (r) =>
+    fs.writeFileSync(path.join(dir, `${r.number}.json`), `${JSON.stringify(r, null, 2)}\n`);
+  put(rec(1, ['verity:request', 'verity:circuit-open']));
+  put(rec(2, ['verity:request', 'verity:needs-human']));
+  put(rec(3, ['verity:request'], 'CLOSED'));
+  const snap = operator.snapshot(cwd, { substrate: 'local' });
+  assertEqual(snap.online, true, 'local is online');
+  assertEqual(snap.queue.requests_pending, 1, 'record #1 pending');
+  assertEqual(snap.queue.requests_parked, 1, 'record #2 parked');
+  assertEqual(snap.next?.role, 'plan', 'plan next');
+  assertEqual(snap.next.target, 1, 'on record #1');
+  assertEqual(snap.next.target_type, 'issue', 'the worker synthesis target type');
+});

@@ -541,6 +541,7 @@ test('seam: agent-exec module.exports surface is intact (worker/test compatibili
     'parseVersion',
     'readAllowlist',
     'readParkedResult', // stage 31 (ADR-0014): re-read a parked result for the worker's resume
+    'readResultGate', // stage 115 (ADR-0038 D4): re-read a gated plan's own marker gate (spec-unsound)
     'renderPrompt',
     'resolveRole',
   ];

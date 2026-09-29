@@ -1367,6 +1367,7 @@ module.exports = {
   STAGE21_HEADER,
   UNKNOWN_COST_GATE,
   appendUsage,
+  botIdentityEnv,
   botIdentityGitArgs,
   checkDailyLimits,
   dispatch,

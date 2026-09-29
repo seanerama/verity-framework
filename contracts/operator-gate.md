@@ -119,3 +119,16 @@ Amended additively 2026-09-27 (stage 111): each `operator work` item MAY carry
 `depends_on: number[]` — the stage numbers this stage depends on, `[]` when the stage
 file records `none`. OPTIONAL: consumers tolerate its absence (a pre-111 engine omits
 it); `schema` stays `1`.
+
+Amended additively 2026-09-29 (ADR-0038 D4, request #304): a request parked by the
+plan role's spec-soundness gate appears in `operator gates` with `gate:
+"spec-unsound"`, `role: "plan"`, `work_item: { type: "issue", number: <request> }`,
+`stage: null`, `pull_request: null`, `risk: null`, every `evidence` field `null`
+(there is no PR to classify), `next_on_approve: null` (approval does not apply — the
+spec must change), `allowed_actions: ["clear-needs-human"]`, and an OPTIONAL
+`gaps: string[]` — the named gaps the role reported, verbatim from the gate
+comment's `## Spec gaps` section (`[]` when the comment could not be read; the
+`reason` string still names the gate). Requests do NOT appear in `operator work`
+(its `bucket` vocabulary is frozen; pending intake is counted in
+`snapshot.queue.requests_pending`). OPTIONAL: consumers tolerate absence; `schema`
+stays `1`.

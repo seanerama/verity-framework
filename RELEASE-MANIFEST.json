@@ -1,14 +1,14 @@
 {
   "schema": 1,
-  "version": "1.7.0",
-  "promotion_id": "PROM-0006",
-  "development_commit": "3fed5fa5f13f4a6d2ad264ec502d9e39e312dd1f",
+  "version": "1.8.0",
+  "promotion_id": "PROM-0007",
+  "development_commit": "bf6e316c62a79e0f99fad1e38789ec090a51504b",
   "classification_digest": "sha256:26b43f3dd4cb0f3df0f3dc654b57c60d99b9cd19a17488ddd35bcfefb1374bfc",
-  "staging_digest": "sha256:4fe9e79eaee9f8754a4739c8ee7adf4b6f549888cf5f58b95f818981e0f1953e",
-  "package_shasum": "fd58a10506874841887cb795954112ee0a8c6a55",
+  "staging_digest": "sha256:eab1e3c88e83a4dec7f53b8bf224a158cfc8a0805d52ba105d5ba909ff46227a",
+  "package_shasum": "baea3c3c03e57323def23cbe8f0485085aec2aeb",
   "verify": {
     "gates": "all-pass",
     "baseline": null
   },
-  "promoted_at": "2026-09-28T18:03:14.010Z"
+  "promoted_at": "2026-09-29T19:23:13.058Z"
 }

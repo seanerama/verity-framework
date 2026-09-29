@@ -204,6 +204,9 @@ const locks = require('../bin/lib/locks.cjs');
 const next = require('../bin/lib/next.cjs');
 const scanner = require('../bin/lib/scanner.cjs');
 const stage = require('../bin/lib/stage.cjs');
+// Stage 115 (ADR-0038 D4): the spec-soundness gate's one text shape (gate
+// comment, gap parsing, §7 result text) — shared with `operator gates`.
+const specSoundness = require('../bin/lib/spec-soundness.cjs');
 const substrateLocal = require('../bin/lib/substrate-local.cjs');
 const trust = require('../bin/lib/trust.cjs');
 // approvalHint's `trust` parameter shadows the module; the shared decision is
@@ -393,9 +396,17 @@ function apiBase(ctx, number) {
   return `repos/${ctx.repo}/issues/${number}`;
 }
 
-function addLabel(ctx, number, label) {
+// Stage 115: `note` (optional) is recorded ONLY on the local substrate, in the
+// record's label commit subject — the local park trail `operator gates` reads
+// (contract local-work-item v1 has no comment surface). Absent ⇒ both paths
+// byte-identical; the github path never reads it.
+function addLabel(ctx, number, label, note) {
   if (ctx.substrate === 'local') {
-    substrateLocal.addLabel(ctx.cwd, number, label);
+    if (note === undefined) {
+      substrateLocal.addLabel(ctx.cwd, number, label);
+    } else {
+      substrateLocal.addLabel(ctx.cwd, number, label, { note });
+    }
     return;
   }
   // Stage 112: a label add is idempotent on GitHub (an already-present label is
@@ -620,6 +631,12 @@ function countRepeatedRole(comments, role) {
       continue;
     }
     seen.add(identity);
+    // Stage 115 (ADR-0038 D4): a spec-unsound park is not a strike. The
+    // request only runs again after a human cleared the park (having amended
+    // the spec), so its summary BREAKS the streak rather than extending it.
+    if (specSoundness.SUMMARY_RESULT_RE.test(body)) {
+      break;
+    }
     if (roles.length !== 1 || roles[0] !== role) {
       break;
     }
@@ -1910,6 +1927,24 @@ function gatePause(ctx, { runId, policy, target, gate, pending, parked = null, a
   );
 }
 
+// Stage 115 (ADR-0038 D4): the marker's own gate for a gated P4 plan, when it
+// is `spec-unsound` — { gate, reason } — else null. The agent-result wire
+// carries no gate (frozen v1), so it is re-read from the run's persisted
+// transcript (agent-exec.readResultGate: disk only, zero spawns). An
+// unreadable transcript is logged and reads as null: the result then takes
+// today's gate path (a pause for approval) — never a guessed park.
+function readSpecUnsound(ctx, { runId, provider }) {
+  try {
+    const g = agentExec.readResultGate({ 'run-id': runId, role: 'plan', agent: provider });
+    return g !== null && g.gate === specSoundness.SPEC_UNSOUND_GATE ? g : null;
+  } catch (err) {
+    ctx.stderr(
+      `verity-worker: warn: could not re-read the plan role's marker gate for run ${runId} (${oneLine(err.message)}) — treating its gated result as an ordinary gate (stage 115)`,
+    );
+    return null;
+  }
+}
+
 // The cross-tick half of the no-progress strike: read the item's run-summary
 // trail once. BEST-EFFORT — a trail we cannot read yields 0, because "we could
 // not prove repetition" must not become "we refuse to work". The within-run
@@ -2522,6 +2557,45 @@ function runLoop(ctx, { policy, runId, item, budgetApproved = false }) {
       res.gate = null;
     }
 
+    // Stage 115 (ADR-0038 D4): the spec-soundness gate. A P4 plan whose marker
+    // reports `gated` with gate `spec-unsound` judged the request's spec not
+    // buildable — so the request is PARKED for a human (`verity:needs-human`, with the
+    // named gaps), never paused for approval: approving would only re-run the
+    // same plan on the same spec. `verity:request` stays on (the request is
+    // still un-planned; clearing the park lets the P4 tier re-select it), no
+    // strike is counted (a gated run writes no `outcome:failed*` unlock, and
+    // countRepeatedRole reads this summary as a streak breaker), and the
+    // engine committed nothing (agent-exec's intent-artifacts step records
+    // `skipped` for any gated outcome). Keyed on all three facts — any other
+    // gate, role, or tier takes the unchanged path below (no kill-switch: the
+    // gate fires only when the role emits it).
+    const unsound =
+      res.outcome === 'gated' && plan.role === 'plan' && item.tier === 'P4' && !resumed
+        ? readSpecUnsound(ctx, { runId, provider: roleCfg.provider })
+        : null;
+    if (unsound !== null) {
+      const gaps = specSoundness.gapsFromReason(unsound.reason);
+      addLabel(ctx, item.number, NEEDS_HUMAN_LABEL, specSoundness.LOCAL_LABEL_NOTE);
+      // github: the gate comment (a non-idempotent POST — stage 112: an
+      // ambiguous failure throws, never re-posts). local: postComment's run-log
+      // route (no comment surface, contract local-work-item v1).
+      postComment(
+        ctx,
+        item.number,
+        specSoundness.formatGateComment({
+          runId,
+          number: item.number,
+          gaps,
+          mentions: policy.notify?.mention || [],
+        }),
+      );
+      return summary(
+        'gated',
+        `${specSoundness.SUMMARY_RESULT_PREFIX}request #${item.number} parked ${NEEDS_HUMAN_LABEL} with ${gaps.length} named spec gap(s); nothing was planned`,
+        specSoundness.SPEC_UNSOUND_GATE,
+        { approval_hint: specSoundness.resumeHint(item.number) },
+      );
+    }
     if (res.outcome === 'gated') {
       const gate = gateNameFor(plan.role, policy);
       gatePause(ctx, {
